@@ -10,6 +10,8 @@
 - Import: mRemoteNG connection files can be imported — the folder structure is preserved and per-connection attributes (protocol, host, port, username) are mapped; passwords are imported when the export file uses supported encryption. (@andreafunicelli)
 - Import: MobaXterm private keys can be imported, and PuTTY `.ppk` keys are supported as authentication keys — keys from PuTTY-based tools can be selected directly, without converting them to OpenSSH format first. (@chris-edstrom)
 - MCP: file tools now run through the connection's file-transfer session, following the connection's transfer protocol — SFTP or SCP — so hosts whose SSH server provides no SFTP subsystem (common on embedded devices) work by switching the connection to SCP.
+- Terminal: the terminal type (TERM) is configurable per connection for SSH, Telnet and local sessions, with an app-level default for connections without an explicit choice — hosts that need a specific TERM (e.g. a legacy type) no longer require workarounds.
+- Sync: snapshot remotes now support SFTP, S3 and SMB in addition to WebDAV — all backends are configured in the same dialog with a test-connection button, and existing WebDAV remotes keep working unchanged.
 - i18n: Portuguese and Vietnamese locales — the UI now ships pt / vi translations selectable in settings.
 
 **Improvements**
@@ -40,6 +42,7 @@
 - Terminal: fixes full-screen TUIs (ncurses menus, ...) rendering incorrectly under heavy load — no more corrupted output or leftover content after exiting.
 - Credentials: fixes the credential store failing to unlock after the data directory is moved or copied, and a possible lockout after switching the encryption mode or changing the master password.
 - UI: fixes a black flash at startup when a light theme is configured.
+- RDP: fixes the app freezing on connect when the security warning dialog appears under an OS language other than Chinese/English — dialogs are now detected by window ownership instead of localized titles and confirmed via language-independent control IDs.
 
 Thanks to @surenwuyuwuqiu, @dungvv, @andreafunicelli, @chris-edstrom and @IBRAHIMELAMRABET for their contributions to this release.
 
@@ -51,6 +54,8 @@ Thanks to @surenwuyuwuqiu, @dungvv, @andreafunicelli, @chris-edstrom and @IBRAHI
 - 导入：支持导入 mRemoteNG 连接文件——保留文件夹层级结构，映射各连接的协议、主机、端口、用户名等属性；导出文件使用受支持加密方式时密码可一并导入。(@andreafunicelli)
 - 导入：支持导入 MobaXterm 私钥，并支持使用 PuTTY `.ppk` 密钥认证——来自 PuTTY 系工具的密钥可直接选用，无需先转换为 OpenSSH 格式。(@chris-edstrom)
 - MCP：文件工具改走连接的文件传输会话，传输协议跟随连接设置——支持 SFTP 或 SCP，没有 SFTP 子系统的主机（嵌入式设备常见）把连接改为 SCP 即可使用。
+- 终端：终端类型（TERM）可按连接为 SSH、Telnet 与本地会话分别配置，未显式选择的连接沿用应用级默认值——需要特定 TERM 的主机（如老式终端类型）不再需要变通手段。
+- 同步：快照远端在 WebDAV 之外新增 SFTP、S3 和 SMB 支持——各后端在同一对话框中配置并提供测试连接按钮，既有 WebDAV 远端无需改动、继续可用。
 - 国际化：新增葡萄牙语、越南语——设置中现可选 pt / vi 界面语言。
 
 **改进**
@@ -81,6 +86,7 @@ Thanks to @surenwuyuwuqiu, @dungvv, @andreafunicelli, @chris-edstrom and @IBRAHI
 - 终端：修复负载高时全屏 TUI（ncurses 菜单等）界面显示错乱、退出后残留内容的问题。
 - 凭据：修复数据目录移动或复制后凭据存储无法恢复解锁的问题，以及切换加密模式 / 修改主密码后可能锁死存储的问题。
 - 界面：修复浅色主题下启动时闪黑的问题。
+- RDP：修复操作系统语言非中文/英文时连接弹出安全提示对话框导致应用卡死的问题——现在按窗口归属关系识别对话框、按语言无关的控件 ID 确认，不再依赖本地化标题。
 
 感谢 @surenwuyuwuqiu、@dungvv、@andreafunicelli、@chris-edstrom 和 @IBRAHIMELAMRABET 对本版本的贡献。
 
