@@ -2047,5 +2047,6 @@
   "netscan.export.failed": "Export failed: ",
   "netscan.export.copy": "Copy",
   "netscan.export.copied": "Scan results copied to clipboard",
-  "netscan.export.copyFailed": "Copy failed: "
+  "netscan.export.copyFailed": "Copy failed: ",
+  "terminal.copySingleLine": "Copy as single line"
 }

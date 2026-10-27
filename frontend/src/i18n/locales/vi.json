@@ -2016,5 +2016,6 @@
   "netscan.export.failed": "Xuất thất bại: ",
   "netscan.export.copy": "Sao chép",
   "netscan.export.copied": "Đã sao chép kết quả quét vào clipboard",
-  "netscan.export.copyFailed": "Sao chép thất bại: "
+  "netscan.export.copyFailed": "Sao chép thất bại: ",
+  "terminal.copySingleLine": "Sao chép thành một dòng"
 }

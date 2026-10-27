@@ -2016,5 +2016,6 @@
   "netscan.export.failed": "Ошибка экспорта: ",
   "netscan.export.copy": "Копировать",
   "netscan.export.copied": "Результаты сканирования скопированы в буфер обмена",
-  "netscan.export.copyFailed": "Ошибка копирования: "
+  "netscan.export.copyFailed": "Ошибка копирования: ",
+  "terminal.copySingleLine": "Копировать одной строкой"
 }

@@ -63,6 +63,7 @@
       <MenuItem :class="{ disabled: !menu.hasSelection.value }" :shortcut="menuShortcut('copy')" @click="menu.copySelection">
         {{ t('terminal.copy') }}
       </MenuItem>
+      <MenuItem :class="{ disabled: !menu.hasSelection.value }" @click="menu.copySingleLine">{{ t('terminal.copySingleLine') }}</MenuItem>
       <MenuItem :class="{ disabled: !menu.hasSelection.value }" @click="menu.copyAndPaste">
         {{ t('terminal.copyAndPaste') }}
       </MenuItem>
@@ -140,7 +141,8 @@ import type { Terminal } from '@xterm/xterm'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { SessionResize, SessionEndZmodem } from '../../bindings/github.com/ys-ll/uniterm/app'
-import { queuedSessionWrite } from '../services/sessionWriter'
+import { queuedSessionWrite as queueRawSessionWrite } from '../services/sessionWriter'
+import { observeCommandInput, updateCommandWraps, getTerminalSelection } from '../services/terminalCommandWrap'
 import { WriteFileBase64, SaveFileDialog, FrontendLog, EnableSessionOutputLog, DisableSessionOutputLog, GetSessionOutputLogInfo, OpenPathInExplorer } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { useNativeFileDrop } from '../composables/useFilePanel'
 import { connectFileMenuKey } from '../utils/fileTransferUtils'
@@ -258,6 +260,7 @@ function writeStamped(data: string, onParsed?: () => void) {
   const ts = Date.now()
   const before = currentAbsoluteLine(sid)
   t.write(data, () => {
+    updateCommandWraps(t)
     recordWrite(sid, before, ts)
     onParsed?.()
   })
@@ -662,7 +665,7 @@ function getSearchAddon() {
 }
 
 function getSelection(): string {
-  return terminal?.getSelection() || ''
+  return terminal ? getTerminalSelection(terminal) : ''
 }
 
 async function applySuggestion(item: ReturnType<typeof suggestions.getSelectedItem>) {
@@ -939,6 +942,12 @@ function onSplitResizeEnd() {
   })
 }
 
+function queuedSessionWrite(sessionId: string, data: string) {
+  const managed = getManagedTerminal(sessionId)
+  if (managed && managed.activeRefs.size > 0) observeCommandInput(managed.terminal, data)
+  return queueRawSessionWrite(sessionId, data)
+}
+
 function writeTerminalInput(data: string, inAlternateScreen: boolean) {
   const sid = props.sessionId
   const filtered = filterTerminalInput(data, inAlternateScreen)
@@ -1015,7 +1024,7 @@ function handleTerminalKey(e: KeyboardEvent): boolean {
   // macOS Cmd+C: copy selection when there is one. With no selection, don't
   // intercept — let it pass through (Ctrl+C interrupt uses ctrlKey, unaffected).
   if (isMac && e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'c' || e.key === 'C') && e.type === 'keydown') {
-    const sel = terminal?.getSelection()
+    const sel = (terminal ? getTerminalSelection(terminal) : undefined)
     if (sel) {
       e.preventDefault()
       writeClipboard(sel)
@@ -1190,9 +1199,19 @@ function onTerminalTouchEnd() {
   touchPan.raf = requestAnimationFrame(step)
 }
 
+function onNativeTerminalCopy(event: ClipboardEvent) {
+  if (!isActive.value || !terminal || !event.clipboardData) return
+  const text = getTerminalSelection(terminal)
+  if (text === terminal.getSelection()) return
+  event.clipboardData.setData('text/plain', text)
+  event.preventDefault()
+  event.stopImmediatePropagation()
+}
+
 onMounted(() => {
   nativeDrop.bind()
   if (!terminalRef.value) return
+  terminalRef.value.addEventListener('copy', onNativeTerminalCopy, true)
 
   // Acquire shared terminal from manager (or create if first mount)
   const opts = getTerminalOptions()
@@ -1509,7 +1528,7 @@ onMounted(() => {
   terminal.onSelectionChange(() => {
     if (settingsStore.settings.terminal.selectionAction !== 'copy') return
     setTimeout(() => {
-      const text = terminal?.getSelection()
+      const text = (terminal ? getTerminalSelection(terminal) : undefined)
       if (!text) {
         // Selection cleared: reset the dedup guard, or re-selecting the same
         // text would never re-copy and a lost write could never be retried.
@@ -1759,7 +1778,7 @@ onMounted(() => {
     if (!isActive.value) return
     const detail = (e as CustomEvent).detail
     if (detail?.panelId && detail.panelId !== props.panelId) return
-    const sel = terminal?.getSelection()
+    const sel = (terminal ? getTerminalSelection(terminal) : undefined)
     if (sel) {
       writeClipboard(sel)
     }
@@ -2156,6 +2175,7 @@ watch(
 // so detachTerminal would see terminalRef.value === null and skip.
 // onBeforeUnmount fires while refs are still valid.
 onBeforeUnmount(() => {
+  terminalRef.value?.removeEventListener('copy', onNativeTerminalCopy, true)
   if (props.sessionId && terminalRef.value) {
     detachTerminal(props.sessionId, terminalRef.value)
   }

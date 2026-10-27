@@ -2016,5 +2016,6 @@
   "netscan.export.failed": "Export fehlgeschlagen: ",
   "netscan.export.copy": "Kopieren",
   "netscan.export.copied": "Scanergebnisse in die Zwischenablage kopiert",
-  "netscan.export.copyFailed": "Kopieren fehlgeschlagen: "
+  "netscan.export.copyFailed": "Kopieren fehlgeschlagen: ",
+  "terminal.copySingleLine": "Als eine Zeile kopieren"
 }

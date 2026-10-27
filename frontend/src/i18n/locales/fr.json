@@ -2016,5 +2016,6 @@
   "netscan.export.failed": "Échec de l'export : ",
   "netscan.export.copy": "Copier",
   "netscan.export.copied": "Résultats du scan copiés dans le presse-papiers",
-  "netscan.export.copyFailed": "Échec de la copie : "
+  "netscan.export.copyFailed": "Échec de la copie : ",
+  "terminal.copySingleLine": "Copier sur une seule ligne"
 }

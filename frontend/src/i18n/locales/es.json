@@ -2016,5 +2016,6 @@
   "netscan.export.failed": "Error al exportar: ",
   "netscan.export.copy": "Copiar",
   "netscan.export.copied": "Resultados del escaneo copiados al portapapeles",
-  "netscan.export.copyFailed": "Error al copiar: "
+  "netscan.export.copyFailed": "Error al copiar: ",
+  "terminal.copySingleLine": "Copiar en una sola línea"
 }

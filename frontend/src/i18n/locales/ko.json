@@ -2016,5 +2016,6 @@
   "netscan.export.failed": "내보내기 실패: ",
   "netscan.export.copy": "복사",
   "netscan.export.copied": "스캔 결과가 클립보드에 복사되었습니다",
-  "netscan.export.copyFailed": "복사 실패: "
+  "netscan.export.copyFailed": "복사 실패: ",
+  "terminal.copySingleLine": "한 줄로 복사"
 }

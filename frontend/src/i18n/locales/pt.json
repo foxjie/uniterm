@@ -2016,5 +2016,6 @@
   "netscan.export.failed": "Falha na exportação: ",
   "netscan.export.copy": "Copiar",
   "netscan.export.copied": "Resultados da verificação copiados para a área de transferência",
-  "netscan.export.copyFailed": "Falha ao copiar: "
+  "netscan.export.copyFailed": "Falha ao copiar: ",
+  "terminal.copySingleLine": "Copiar em uma linha"
 }

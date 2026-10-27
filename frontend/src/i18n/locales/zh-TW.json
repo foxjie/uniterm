@@ -2047,5 +2047,6 @@
   "netscan.export.failed": "匯出失敗：",
   "netscan.export.copy": "複製",
   "netscan.export.copied": "掃描結果已複製到剪貼簿",
-  "netscan.export.copyFailed": "複製失敗："
+  "netscan.export.copyFailed": "複製失敗：",
+  "terminal.copySingleLine": "複製為單行"
 }

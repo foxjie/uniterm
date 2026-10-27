@@ -83,6 +83,19 @@ describe('useTerminalMenu.writeClipboard', () => {
     stubMacUserAgent()
   })
 
+  it('copies as one line only when explicitly requested', async () => {
+    mockClipboardSetText.mockResolvedValue(true)
+    const m = buildMenu(() => "echo 'aa  \r\nbb'\nnext")
+    m.copySelection()
+    await flushAsync()
+    expect(mockClipboardSetText).toHaveBeenLastCalledWith("echo 'aa  \r\nbb'\nnext")
+    m.menuVisible.value = true
+    m.copySingleLine()
+    await flushAsync()
+    expect(mockClipboardSetText).toHaveBeenLastCalledWith("echo 'aa  bb'next")
+    expect(m.menuVisible.value).toBe(false)
+  })
+
   it('falls back to navigator.clipboard.writeText when Wails resolves false', async () => {
     mockClipboardSetText.mockResolvedValue(false)
     const m = buildMenu(() => 'hello')

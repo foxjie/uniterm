@@ -2016,5 +2016,6 @@
   "netscan.export.failed": "エクスポート失敗: ",
   "netscan.export.copy": "コピー",
   "netscan.export.copied": "スキャン結果をクリップボードにコピーしました",
-  "netscan.export.copyFailed": "コピー失敗: "
+  "netscan.export.copyFailed": "コピー失敗: ",
+  "terminal.copySingleLine": "1 行としてコピー"
 }
