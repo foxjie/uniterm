@@ -17,6 +17,7 @@ import { useZmodemStore } from '../stores/zmodemStore'
 import { queuedSessionWrite } from './sessionWriter'
 import type { CustomTerminalTheme } from '../types/settings'
 import { formatFontFamily } from '../utils/formatFontFamily'
+import { MIN_LINE_NUMBER_DIGITS } from '../utils/terminalGutter'
 import { installImeCompatibilityPatch } from '../utils/xtermImeCompatibility'
 import {
   bufferRowSource,
@@ -65,6 +66,8 @@ export interface ManagedTerminal {
    * the gutter's line-number and time columns. Kept on the shared terminal so
    * it survives KeepAlive and drag-across-panes. */
   lineRegistry: LineRegistryState
+  /** Largest reserved line-number digit count, shared across gutter mounts. */
+  lineNumberDigits: number
   /** Absolute-row offset accumulated from scrollback trimming, so both the
    * line-number and timestamp columns stay continuous as old lines drop off
    * the top of the buffer. */
@@ -427,6 +430,7 @@ export function acquireTerminal(
       isNew: true,
       onDataGeneration: 0,
       lineRegistry: createLineRegistry(),
+      lineNumberDigits: MIN_LINE_NUMBER_DIGITS,
       lineOffset: 0,
       trimDispose: null,
       resizeDispose: null,
