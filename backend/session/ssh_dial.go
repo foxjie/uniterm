@@ -126,7 +126,7 @@ func DialSSHClient(config ConnectionConfig) (*ssh.Client, error) {
 				User:            config.User,
 				Auth:            authMethods,
 				Timeout:         30 * time.Second,
-				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				HostKeyCallback: HostKeyCallback(config.Host, strconv.Itoa(config.Port), ResolveHostKeyStrategy("")),
 			}, cleanup, nil
 		}
 	}
