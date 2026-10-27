@@ -17,6 +17,7 @@ import {
   validateRequiredString,
   validateObject,
 } from '../utils/runtimeTypeCheck'
+import { assessLocalRisk } from './localRisk'
 
 // Global token listener management: only one runAgent instance should receive
 // ai:token events at a time. Registering a new listener automatically cancels
@@ -82,11 +83,20 @@ type RiskLevel = 'read' | 'write' | 'dangerous'
 
 export const VALID_RISK: readonly RiskLevel[] = ['read', 'write', 'dangerous']
 
+// riskOrder supports max(modelRisk, localRisk) merging.
+const riskOrder: Record<RiskLevel, number> = { read: 0, write: 1, dangerous: 2 }
+
 export function getRisk(tu: { name: string; input: Record<string, unknown> }): RiskLevel {
   if (tu.name !== 'execute_command' && tu.name !== 'start_command') return 'dangerous'
   const risk = tu.input.risk
-  if (risk === 'read' || risk === 'write' || risk === 'dangerous') return risk
-  return 'dangerous' // default-closed: unknown / missing / wrong-typed → dangerous
+  let level: RiskLevel = 'dangerous'
+  if (risk === 'read' || risk === 'write' || risk === 'dangerous') level = risk
+  // S2: local risk guard — max(modelRisk, localRisk). Even if a prompt-injected
+  // model labels `rm -rf ~` as risk:"read", the local pattern match overrides
+  // to dangerous so the user still gets a confirmation prompt.
+  const cmd = typeof tu.input.command === 'string' ? tu.input.command : ''
+  const local = assessLocalRisk(cmd)
+  return riskOrder[local] > riskOrder[level] ? local : level
 }
 
 function shouldConfirm(risk: RiskLevel): boolean {
