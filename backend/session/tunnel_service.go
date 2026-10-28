@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/ys-ll/uniterm/backend/log"
 )
 
 // tunnelEntry holds the SSH client and listener for a single tunnel.
@@ -86,8 +88,11 @@ func (ts *TunnelService) Start(sessionID string, sshConfig ConnectionConfig, tar
 		tcpConn.SetKeepAlivePeriod(sshKeepAliveInterval)
 	}
 
+	handshakeStart := time.Now()
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, clientConfig)
 	if err != nil {
+		log.Writef("[tunnel] ssh handshake %s failed after %s: %v",
+			addr, time.Since(handshakeStart).Round(time.Millisecond), err)
 		conn.Close()
 		return 0, fmt.Errorf("tunnel ssh handshake: %w", err)
 	}
@@ -112,8 +117,11 @@ func (ts *TunnelService) Start(sessionID string, sshConfig ConnectionConfig, tar
 				return
 			}
 			go func() {
+				dialStart := time.Now()
 				remoteConn, err := client.Dial("tcp", target)
+				dialDur := time.Since(dialStart).Round(time.Millisecond)
 				if err != nil {
+					log.Writef("[tunnel] forward dial %s failed after %s: %v", target, dialDur, err)
 					localConn.Close()
 					return
 				}

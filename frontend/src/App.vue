@@ -7,6 +7,7 @@
       @toggle-sidebar="sidebarVisible = !sidebarVisible"
       @open-settings="openSettings"
       @open-netscan="openNetscan"
+      @open-local-services="openLocalServices"
       @close-tab="closeTab"
       @close-tab-batch="closeTabBatch"
       @toggle-ai-lock="onToggleAiLock"
@@ -394,6 +395,7 @@ const dataDirVisible = ref(false)
 const encryptVisible = ref(false)
 const unlockVisible = ref(false)
 const netscanVisible = ref(false)
+const localServicesVisible = ref(false)
 
 // Determine which credential dialog (recovery-unlock / setup) to show based
 // on the current store status. Shared by startup and by the first-run
@@ -1177,6 +1179,10 @@ function onNetscanNewConnection(d: { host: string; port?: number; type?: string 
   if (d.type) cfg.type = d.type
   editConfig.value = cfg as ConnectionConfig
   showConnectionForm.value = true
+}
+
+function openLocalServices() {
+  localServicesVisible.value = true
 }
 
 async function closeTab(tabId: string, opts: { skipConfirm?: boolean } = {}) {
