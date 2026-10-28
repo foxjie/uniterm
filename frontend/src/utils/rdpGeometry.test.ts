@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { adaptiveRdpSize, rdpContentRect, rdpPointerPosition } from './rdpGeometry'
+import { adaptiveRdpSize, rdpContentRect, rdpPointerPosition, rdpScaleFactor } from './rdpGeometry'
 
 describe('adaptive RDP desktop dimensions', () => {
   it('uses one consistent alignment for initial connection and resizing', () => {
@@ -33,6 +33,31 @@ describe('adaptive RDP desktop dimensions', () => {
 
   it.each([0, -1, NaN, Infinity])('handles an invalid display scale %s', ratio => {
     expect(adaptiveRdpSize(1280, 720, ratio)).toEqual({ width: 1280, height: 720 })
+  })
+})
+
+describe('RDP DPI scale factor', () => {
+  it.each([[1.25, 125], [1.5, 150], [1.75, 175], [2, 200], [2.5, 250]])(
+    'requests %d%% session DPI for a display at ratio %s', (ratio, percent) => {
+      expect(rdpScaleFactor(ratio)).toBe(percent)
+    },
+  )
+
+  it('rounds fractional ratios to the nearest percent', () => {
+    expect(rdpScaleFactor(1.3333)).toBe(133)
+    expect(rdpScaleFactor(1.4999)).toBe(150)
+  })
+
+  it.each([1, 0.8, 0, -1, 1.002, 1.004])('asks for no scaling at display ratio %s', ratio => {
+    expect(rdpScaleFactor(ratio)).toBeNull()
+  })
+
+  it.each([5.01, 5.5, Infinity, NaN])('asks for no scaling outside the protocol range at %s', ratio => {
+    expect(rdpScaleFactor(ratio)).toBeNull()
+  })
+
+  it('accepts the largest factor the protocol allows', () => {
+    expect(rdpScaleFactor(5)).toBe(500)
   })
 })
 

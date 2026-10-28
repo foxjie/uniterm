@@ -106,7 +106,7 @@ import { usePanelStore } from '../stores/panelStore'
 import { writeClipboard, readClipboardText } from '../composables/useClipboardWrite'
 import { RdpClipboardSync, RdpInputQueue } from '../utils/rdpClipboard'
 import { RdpFileTransfer } from '../utils/rdpFileTransfer'
-import { adaptiveRdpSize, rdpContentRect, rdpPointerPosition } from '../utils/rdpGeometry'
+import { adaptiveRdpSize, rdpContentRect, rdpPointerPosition, rdpScaleFactor } from '../utils/rdpGeometry'
 import type { RdpDesktopSize } from '../utils/rdpGeometry'
 import { queueRemoteKeyboardChange, isRdpPasteKey, REMOTE_KEY_SCANCODES as KEY_SCANCODES } from '../utils/remoteKeyboard'
 import type { NativeRdpKey } from '../utils/remoteKeyboard'
@@ -288,6 +288,8 @@ async function startClient(proxyUrl: string, desktopSizeOverride?: RdpDesktopSiz
     const { username, domain } = splitDomainUser(props.config)
     const size = desktopSizeOverride ?? resolveDesktopSize()
     lastResizeRequest = desktopSizeOverride ?? null
+    lastScaleFactor = null
+    wigglePending = null
 
     // proxyUrl: ws://127.0.0.1:<port>/<token> — the token path doubles as
     // the gateway auth token the RDCleanPath handshake must echo.
@@ -857,6 +859,13 @@ let canvasObserver: MutationObserver | null = null
 let pixelRatioQuery: MediaQueryList | null = null
 let reconnecting = false
 let lastResizeRequest: RdpDesktopSize | null = null
+// The DPI scale factor currently applied to the session, so a viewport that
+// only crosses a scaled display (same pixels, different ratio) still gets a
+// resize. Reset with each client.
+let lastScaleFactor: number | null = null
+// Exact target pending after a 2-pixel wiggle delivered a scale-only change
+// (see requestAdaptiveResize); the follow-up PDU bounces back to it.
+let wigglePending: RdpDesktopSize | null = null
 // Infer support from actual framebuffer changes, falling back to reconnect
 // when the server does not handle Display Control resize requests.
 let displayControlUsable: boolean | null = null
@@ -865,11 +874,17 @@ function isAdaptive(): boolean {
   return !!cfg && (cfg.rdpFixedWidth === -2 || cfg.rdpFixedHeight === -2 || (!cfg.rdpFixedWidth && !cfg.rdpFixedHeight))
 }
 
+// Adaptive-mode connect size: the viewport's physical pixels minus 2. The
+// session starts sharp at (visually) the right size; the 2-pixel gap then
+// makes the very first Display Control resize a real bitmap change, which is
+// the only kind of PDU Windows applies a DPI scale to — one PDU, one repaint,
+// final size exact. (Windows silently ignores scale-only PDUs, so starting at
+// the exact size would need a 2px wiggle round-trip and repaint twice.)
 function adaptiveDesktopSize(): RdpDesktopSize | null {
   const bounds = viewportEl.value?.getBoundingClientRect()
-  return bounds && bounds.width > 0 && bounds.height > 0
-    ? adaptiveRdpSize(bounds.width, bounds.height, displayPixelRatio.value)
-    : null
+  if (!bounds || bounds.width <= 0 || bounds.height <= 0) return null
+  const size = adaptiveRdpSize(bounds.width, bounds.height, displayPixelRatio.value)
+  return { width: Math.max(640, size.width - 2), height: size.height }
 }
 
 function currentDesktopSize(): RdpDesktopSize | null {
@@ -933,13 +948,30 @@ function requestAdaptiveResize() {
   if (!session || status.value !== 'connected' || reconnecting) return
   if (!isAdaptive()) return
   // Scrollbars in the unscaled view must not change the negotiated resolution.
-  const targetSize = adaptiveDesktopSize()
-  if (!targetSize) return
-  const { width, height } = targetSize
+  const bounds = viewportEl.value?.getBoundingClientRect()
+  if (!bounds || bounds.width <= 0 || bounds.height <= 0) return
+  // Servers without Display Control cannot apply a DPI scale; keep their
+  // fallback behavior and do not treat the missing scale as a pending change,
+  // or the reconnect path would loop.
+  const scale = displayControlUsable === false ? null : rdpScaleFactor(displayPixelRatio.value)
+  // The layout carries the viewport's *physical* size; the DPI scale rides
+  // along. Window drags always change the bitmap and apply directly. A
+  // scale-only change (bitmap already at the target size) does not: Windows
+  // silently ignores PDUs that leave the bitmap untouched, so deliver the
+  // scale inside a 2-pixel shrink and bounce back to the exact size after.
+  const exact = adaptiveRdpSize(bounds.width, bounds.height, displayPixelRatio.value)
+  let { width, height } = exact
   const cur = currentDesktopSize()
-  if (cur?.width === width && cur.height === height) return
+  const wiggleNow = scale !== null && cur !== null &&
+    cur.width === width && cur.height === height && scale !== lastScaleFactor
+  if (wiggleNow) width -= 2
+  if (cur?.width === width && cur.height === height && scale === lastScaleFactor) return
+  // A scale factor rides the display control channel; sending it before the
+  // first frame (channel may not be up yet) risks a silent drop, so wait for
+  // the canvas observer to retry once dimensions are known.
+  if (scale !== null && !cur) return
   // Do not reconnect repeatedly if a server clamps/refuses this resolution.
-  if (lastResizeRequest?.width === width && lastResizeRequest.height === height) return
+  if (lastResizeRequest?.width === width && lastResizeRequest.height === height && scale === lastScaleFactor) return
   lastResizeRequest = { width, height }
   clearResizeProbe()
   if (displayControlUsable === false) {
@@ -947,29 +979,52 @@ function requestAdaptiveResize() {
     return
   }
   try {
-    session.resize(width, height)
+    wigglePending = wiggleNow ? { width: exact.width, height: exact.height } : null
+    rdpLog(`adaptive resize: layout=${width}x${height} scale=${scale} cur=${cur?.width}x${cur?.height} dpr=${displayPixelRatio.value}`)
+    session.resize(width, height, scale)
+    lastScaleFactor = scale
     const generation = clientGeneration
-    resizeProbeTimer = setTimeout(() => {
-      resizeProbeTimer = null
-      if (generation !== clientGeneration || status.value !== 'connected' || reconnecting) return
-      const target = adaptiveDesktopSize()
-      if (!target) return
-      if (target.width !== width || target.height !== height) {
-        requestAdaptiveResize()
-        return
-      }
-      const now = currentDesktopSize()
-      if (now?.width === width && now.height === height) {
-        displayControlUsable = true
-      } else {
-        displayControlUsable = false
-        reconnectWithSize(width, height)
-      }
-    }, 2000)
+    const frameAtSend = cur
+    // Windows servers begin processing Display Control PDUs only seconds
+    // after the connection is established; a PDU sent at first-frame time is
+    // silently dropped. "Framebuffer did not move at all" means that drop —
+    // resend until the channel picks the PDU up.
+    const scheduleProbe = (attempt: number) => {
+      resizeProbeTimer = setTimeout(() => {
+        resizeProbeTimer = null
+        if (generation !== clientGeneration || status.value !== 'connected' || reconnecting) return
+        const t = viewportEl.value?.getBoundingClientRect()
+        if (!t || t.width !== bounds.width || t.height !== bounds.height) {
+          requestAdaptiveResize()
+          return
+        }
+        const now = currentDesktopSize()
+        if (now?.width === width && now.height === height) {
+          rdpLog(`display control resize confirmed: bitmap ${width}x${height} scale=${scale}`)
+          displayControlUsable = true
+          if (wigglePending) {
+            rdpLog(`scale applied via 2px wiggle — bouncing back to ${wigglePending.width}x${wigglePending.height}`)
+            requestAdaptiveResize()
+          }
+        } else if (
+          attempt < 4 && frameAtSend && now &&
+          now.width === frameAtSend.width && now.height === frameAtSend.height
+        ) {
+          rdpLog(`display control PDU dropped (attempt ${attempt}, framebuffer still ${now.width}x${now.height}) — resending`)
+          try { session.resize(width, height, scale) } catch (_) { /* the next probe handles it */ }
+          scheduleProbe(attempt + 1)
+        } else {
+          rdpLog(`display control resize not applied (framebuffer ${now?.width}x${now?.height} want ${width}x${height}) — falling back to reconnect`)
+          displayControlUsable = false
+          reconnectWithSize(exact.width, exact.height)
+        }
+      }, 2000)
+    }
+    scheduleProbe(1)
   } catch (e) {
     rdpLog(`adaptive resize failed: ${String(e)}`)
     displayControlUsable = false
-    reconnectWithSize(width, height)
+    reconnectWithSize(exact.width, exact.height)
   }
 }
 
@@ -994,7 +1049,17 @@ onMounted(() => {
   canvasObserver = new MutationObserver(() => {
     const canvas = canvasEl.value
     if (canvas && canvas.width > 0 && canvas.height > 0) {
+      const firstFrame = framebufferSize.value === null
       framebufferSize.value = { width: canvas.width, height: canvas.height }
+      // Dimensions arriving is the signal that a DPI scale deferred by
+      // requestAdaptiveResize can now be sent. Hold back ~1.2 s: Windows
+      // servers ignore Display Control PDUs sent right after the handshake,
+      // and a send that lands inside that window may still be processed once
+      // the channel comes up — so the resend below would double-repaint.
+      if (firstFrame) {
+        rdpLog(`first frame ${canvas.width}x${canvas.height} — deferring adaptive scale (dpr=${displayPixelRatio.value})`)
+        setTimeout(() => requestAdaptiveResize(), 1200)
+      }
     }
   })
   canvasObserver.observe(canvasEl.value!, { attributes: true, attributeFilter: ['width', 'height'] })
