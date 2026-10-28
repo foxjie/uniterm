@@ -21,6 +21,12 @@ import (
 // DefaultRDPPort is used when a connection config omits the RDP port.
 const DefaultRDPPort = 3389
 
+// tlsProbeTimeout bounds each TLS handshake attempt against the RDP server.
+// A reachable server answers the ClientHello within an RTT, so a silent
+// server is detected quickly and the version fallback moves on instead of
+// sitting out the full connection deadline.
+const tlsProbeTimeout = time.Second
+
 // IronRDPSession runs the local TCP→WebSocket proxy for the IronRDP WASM
 // client. The RDP protocol itself runs entirely in the webview (WASM);
 // Connect's job is: fail-fast reachability check → start the proxy → report
@@ -343,7 +349,7 @@ func (p *RDPProxy) handleWebSocket(ws *websocket.Conn) {
 	// public key delivered out-of-band in the Response). The proxy therefore
 	// dials, replays the client's X.224 request, terminates TLS to the server
 	// and relays the decrypted plaintext.
-	upstreamConn, selected, certChain, x224Resp, err := establishUpstream(ctx, p.target, p.upstream, x224Req)
+	upstreamConn, selected, certChain, x224Resp, err := establishUpstream(ctx, p.target, p.destination, p.upstream, x224Req)
 	if err != nil {
 		reportError(err)
 		log.Writef("[RDPProxy] Upstream establishment failed: %v", err)
@@ -543,17 +549,70 @@ func rewriteX224SslOnly(pdu []byte) {
 	binary.LittleEndian.PutUint32(pdu[off+4:], proto)
 }
 
+// tlsVersionCache remembers, per real RDP target (host:port before any
+// tunnel rewrite), the max TLS version that last completed a handshake.
+// Servers that silently drop a modern ClientHello would otherwise be
+// re-probed (and re-stall) on every reconnect; with the cache the working
+// version is tried first. Self-healing: a cached version that fails is
+// dropped and probing resumes.
+var (
+	tlsVersionCacheMu sync.Mutex
+	tlsVersionCache   = map[string]uint16{}
+)
+
+func cachedTLSVersion(key string) (uint16, bool) {
+	if key == "" {
+		return 0, false
+	}
+	tlsVersionCacheMu.Lock()
+	defer tlsVersionCacheMu.Unlock()
+	v, ok := tlsVersionCache[key]
+	return v, ok
+}
+
+func rememberTLSVersion(key string, v uint16) {
+	if key == "" {
+		return
+	}
+	tlsVersionCacheMu.Lock()
+	defer tlsVersionCacheMu.Unlock()
+	tlsVersionCache[key] = v
+}
+
+func forgetTLSVersion(key string, v uint16) {
+	if key == "" {
+		return
+	}
+	tlsVersionCacheMu.Lock()
+	defer tlsVersionCacheMu.Unlock()
+	if tlsVersionCache[key] == v {
+		delete(tlsVersionCache, key)
+	}
+}
+
 // establishUpstream dials the RDP server, replays the client's X.224
 // request (TPKT included), reads the Connection Confirm, and — when TLS was
 // selected — terminates TLS to the server, retrying on a fresh connection
 // with TLS 1.0 only when the modern handshake gets RST (old servers).
+// cacheKey is the pre-tunnel target used for the TLS version cache.
 // Returns the plaintext-side stream to relay, the selected protocol, the
 // server cert chain (nil for standard RDP security) and the x.224 confirm.
-func establishUpstream(ctx context.Context, target string, upstream *SocksProxy, x224Req []byte) (net.Conn, uint32, [][]byte, []byte, error) {
+func establishUpstream(ctx context.Context, target, cacheKey string, upstream *SocksProxy, x224Req []byte) (net.Conn, uint32, [][]byte, []byte, error) {
 	maxVersions := []uint16{tls.VersionTLS12, tls.VersionTLS10}
+	if known, ok := cachedTLSVersion(cacheKey); ok {
+		maxVersions = []uint16{known}
+		for _, cand := range []uint16{tls.VersionTLS12, tls.VersionTLS10} {
+			if cand != known {
+				maxVersions = append(maxVersions, cand)
+			}
+		}
+	}
 	for i, maxVersion := range maxVersions {
+		dialStart := time.Now()
 		conn, err := dialFirstHopContext(ctx, target, upstream)
+		dialDur := time.Since(dialStart).Round(time.Millisecond)
 		if err != nil {
+			log.Writef("[RDPProxy] dial %s failed after %s: %v", target, dialDur, err)
 			return nil, 0, nil, nil, fmt.Errorf("cannot reach RDP server: %w", err)
 		}
 		stopClose := context.AfterFunc(ctx, func() { conn.Close() })
@@ -576,19 +635,24 @@ func establishUpstream(ctx context.Context, target string, upstream *SocksProxy,
 			return conn, selected, nil, resp, nil
 		}
 
-		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(tlsProbeTimeout))
+		tlsStart := time.Now()
 		tlsConn := tls.Client(conn, &tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec // the proxy is local-only; the WASM client validates nothing here, CredSSP binds to the delivered public key
 			MinVersion:         tls.VersionTLS10,
 			MaxVersion:         maxVersion,
 		})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			forgetTLSVersion(cacheKey, maxVersion)
+			log.Writef("[RDPProxy] TLS handshake to %s failed after %s (maxVersion=0x%x): %v",
+				target, time.Since(tlsStart).Round(time.Millisecond), maxVersion, err)
 			conn.Close()
 			if i == len(maxVersions)-1 {
 				return nil, 0, nil, nil, fmt.Errorf("TLS to RDP server failed: %w", err)
 			}
 			continue
 		}
+		rememberTLSVersion(cacheKey, maxVersion)
 		_ = conn.SetDeadline(time.Time{})
 		certs := tlsConn.ConnectionState().PeerCertificates
 		if len(certs) == 0 {

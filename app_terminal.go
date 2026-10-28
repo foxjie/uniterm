@@ -10,6 +10,7 @@ import (
 	goruntime "runtime"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"go.bug.st/serial"
 
@@ -392,8 +393,11 @@ func (a *App) setupJumpHostTunnel(sessionID string, sessionType string, config *
 	} else if sessionType == "rdp" && targetPort <= 0 {
 		targetPort = session.DefaultRDPPort
 	}
+	tunnelStart := time.Now()
 	localPort, err := a.tunnelService.Start(sessionID, *tunnelSSHConfig, config.Host, targetPort, config.Proxy)
 	if err != nil {
+		log.Writef("[tunnel] start failed for session=%s via ssh=%s after %s: %v",
+			sessionID, config.TunnelSSHConnID, time.Since(tunnelStart).Round(time.Millisecond), err)
 		return fmt.Errorf("tunnel start: %w", err)
 	}
 	log.Writef("[tunnel] established for session=%s via ssh=%s, localPort=%d",
