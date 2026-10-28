@@ -389,6 +389,8 @@ func (a *App) setupJumpHostTunnel(sessionID string, sessionType string, config *
 		} else if targetPort < 100 {
 			targetPort += 5900
 		}
+	} else if sessionType == "rdp" && targetPort <= 0 {
+		targetPort = session.DefaultRDPPort
 	}
 	localPort, err := a.tunnelService.Start(sessionID, *tunnelSSHConfig, config.Host, targetPort, config.Proxy)
 	if err != nil {
@@ -396,6 +398,8 @@ func (a *App) setupJumpHostTunnel(sessionID string, sessionType string, config *
 	}
 	log.Writef("[tunnel] established for session=%s via ssh=%s, localPort=%d",
 		sessionID, config.TunnelSSHConnID, localPort)
+	config.TunnelTargetHost = config.Host
+	config.TunnelTargetPort = targetPort
 	config.Host = "127.0.0.1"
 	config.Port = localPort
 	config.Proxy = nil // proxy was consumed by the jump-host dial; local dial is direct

@@ -18,6 +18,9 @@ import (
 	"time"
 )
 
+// DefaultRDPPort is used when a connection config omits the RDP port.
+const DefaultRDPPort = 3389
+
 // IronRDPSession runs the local TCP→WebSocket proxy for the IronRDP WASM
 // client. The RDP protocol itself runs entirely in the webview (WASM);
 // Connect's job is: fail-fast reachability check → start the proxy → report
@@ -45,9 +48,17 @@ func (s *RDPSession) Connect(config ConnectionConfig) error {
 
 	port := config.Port
 	if port <= 0 {
-		port = 3389
+		port = DefaultRDPPort
 	}
 	target := net.JoinHostPort(config.Host, strconv.Itoa(port))
+	destination := target
+	if config.TunnelTargetHost != "" {
+		tunnelPort := config.TunnelTargetPort
+		if tunnelPort <= 0 {
+			tunnelPort = port
+		}
+		destination = net.JoinHostPort(config.TunnelTargetHost, strconv.Itoa(tunnelPort))
+	}
 
 	s.title = fmt.Sprintf("%s (RDP)", config.Host)
 
@@ -60,6 +71,7 @@ func (s *RDPSession) Connect(config ConnectionConfig) error {
 	proxy := NewRDPProxy(target, config.Proxy, hex.EncodeToString(token), RDPOptions{
 		EnableCredSSP: config.RdpEnableNLA,
 		AdminSession:  config.RdpAdminSession,
+		Destination:   destination,
 	})
 	proxy.SetOnError(func(err error) {
 		s.mu.Lock()
@@ -132,7 +144,8 @@ func (s *RDPSession) LastError() string {
 // session.
 type RDPProxy struct {
 	listener         net.Listener
-	target           string // host:port, post-tunnel rewrite
+	target           string // host:port used to dial upstream, post-tunnel rewrite
+	destination      string // client-visible host:port before the tunnel rewrite
 	upstream         *SocksProxy
 	authToken        string
 	stopCh           chan struct{}
@@ -151,18 +164,27 @@ type RDPProxy struct {
 type RDPOptions struct {
 	EnableCredSSP bool
 	AdminSession  bool
+	// Destination is the RDP target the WASM client puts in RDCleanPath.
+	// It differs from target when an SSH jump-host tunnel rewrote the dial
+	// address to 127.0.0.1:localPort.
+	Destination string
 }
 
 func NewRDPProxy(target string, upstream *SocksProxy, authToken string, options RDPOptions) *RDPProxy {
+	destination := options.Destination
+	if destination == "" {
+		destination = target
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RDPProxy{
-		target:    target,
-		upstream:  upstream,
-		authToken: authToken,
-		stopCh:    make(chan struct{}),
-		options:   options,
-		ctx:       ctx,
-		cancel:    cancel,
+		target:      target,
+		destination: destination,
+		upstream:    upstream,
+		authToken:   authToken,
+		stopCh:      make(chan struct{}),
+		options:     options,
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
@@ -300,11 +322,11 @@ func (p *RDPProxy) handleWebSocket(ws *websocket.Conn) {
 		ws.Close()
 		return
 	}
-	if dest != "" && dest != p.target && dest != p.hostOnly() {
+	if !p.acceptsDestination(dest) {
 		// The session is pinned to one target; refuse anything else. The
-		// client sends its builder destination (bare host), the proxy target
-		// carries the port — both spellings are accepted.
-		log.Writef("[RDPProxy] RDCleanPath destination %q does not match session target %q", dest, p.target)
+		// client sends its builder destination (bare host), the proxy
+		// destination carries the port — both spellings are accepted.
+		log.Writef("[RDPProxy] RDCleanPath destination %q does not match session target %q", dest, p.destination)
 		_ = p.writeRDCleanPathErr(ws, "destination mismatch")
 		ws.Close()
 		return
@@ -346,7 +368,7 @@ func (p *RDPProxy) handleWebSocket(ws *websocket.Conn) {
 	p.tcpConn = upstreamConn
 	p.mu.Unlock()
 
-	resp, err := encodeRDCleanPathResponse(x224Resp, certChain, p.target)
+	resp, err := encodeRDCleanPathResponse(x224Resp, certChain, p.destination)
 	if err != nil {
 		log.Writef("[RDPProxy] RDCleanPath response encode failed: %v", err)
 		ws.Close()
@@ -445,11 +467,21 @@ func (p *RDPProxy) upstreamClosedCallback() func() {
 	return p.onUpstreamClosed
 }
 
-// hostOnly strips the port from the target for lenient destination checks.
+// acceptsDestination pins the RDCleanPath destination to the client-visible
+// RDP target. An empty destination is allowed because the client omits it in
+// some versions.
+func (p *RDPProxy) acceptsDestination(dest string) bool {
+	if dest == "" {
+		return true
+	}
+	return dest == p.destination || dest == p.hostOnly()
+}
+
+// hostOnly strips the port from the destination for lenient destination checks.
 func (p *RDPProxy) hostOnly() string {
-	host, _, err := net.SplitHostPort(p.target)
+	host, _, err := net.SplitHostPort(p.destination)
 	if err != nil {
-		return p.target
+		return p.destination
 	}
 	return host
 }
