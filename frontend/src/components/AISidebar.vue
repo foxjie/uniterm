@@ -20,8 +20,8 @@
             <span class="session-item-name">{{ s.name }}</span>
             <span class="session-time">{{ formatRelativeTime(s.updatedAt) }}</span>
             <template #trailing>
-              <el-icon class="session-delete" :title="t('ai.renameSession')" @click.stop="onSessionRename(s.id); closeMenus()"><Pencil :size="'0.875rem'" /></el-icon>
-              <el-icon class="session-delete" @click.stop="aiStore.deleteSession(s.id); closeMenus()"><Trash2 :size="'0.875rem'" /></el-icon>
+              <el-icon class="session-delete" :title="t('ai.renameSession')" @click.stop="onSessionRename(s.id)"><Pencil :size="'0.875rem'" /></el-icon>
+              <el-icon class="session-delete" :title="t('common.delete')" @click.stop="aiStore.deleteSession(s.id)"><Trash2 :size="'0.875rem'" /></el-icon>
             </template>
           </MenuItem>
         </Menu>
@@ -907,9 +907,14 @@ function onModelSelect(id: string) { closeMenus(); onModelChange(id) }
 function onModeSelect(mode: string) { closeMenus(); onModeChange(mode) }
 
 // ── Session rename (pencil button in the history dropdown) ──
+// The menu stays open across rename/delete so the actions can be repeated
+// without reopening. The dialog floats above the menu, so pause the global
+// outside-click/Escape dismissal while it is up (the click that opened this
+// handler is still propagating to onDocClick, hence the synchronous pause).
 async function onSessionRename(id: string) {
   const s = aiStore.sessions.find(x => x.id === id)
   if (!s) return
+  const resume = sessionMenuRef.value?.pauseDocClose()
   try {
     const name = await ElMessageBox.prompt('', t('ai.renameSession'), {
       confirmButtonText: t('common.confirm'),
@@ -919,6 +924,7 @@ async function onSessionRename(id: string) {
     const v = (name.value || '').trim()
     if (v) aiStore.renameSession(id, v)
   } catch { /* cancelled */ }
+  finally { resume?.() }
 }
 
 // ── Markdown export of the current session (message context menu) ──
