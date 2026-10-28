@@ -158,6 +158,8 @@
     <CredentialUnlockDialog v-model:visible="unlockVisible" @done="onUnlockDone" @reset="onReset" />
     <MobileKeyBar v-if="keyBarSessionId" :key="keyBarSessionId" :session-id="keyBarSessionId" />
     <NetworkScanTabContent v-model:visible="netscanVisible" @new-connection="onNetscanNewConnection" />
+    <LocalServices v-model:visible="localServicesVisible" />
+    <HostKeyChangedDialog />
   </div>
   </el-config-provider>
 </template>
@@ -183,6 +185,8 @@ import { startAndroidKeepAlive, stopAndroidKeepAlive } from './utils/androidKeep
 import { writeClipboard } from './composables/useClipboardWrite'
 import SettingsTabContent from './components/SettingsTabContent.vue'
 import NetworkScanTabContent from './components/netscan/NetworkScanTabContent.vue'
+import HostKeyChangedDialog from './components/HostKeyChangedDialog.vue'
+import LocalServices from './components/localsrv/LocalServices.vue'
 import WorkspaceContent from './components/WorkspaceContent.vue'
 import FileTabContent from './components/FileTabContent.vue'
 import RDPTabContent from './components/RDPTabContent.vue'

@@ -366,7 +366,7 @@ func (s *SSHSession) Connect(config ConnectionConfig) error {
 				User:            config.User,
 				Auth:            authMethods,
 				Timeout:         30 * time.Second,
-				HostKeyCallback: HostKeyCallback(config.Host, strconv.Itoa(config.Port), ResolveHostKeyStrategy("")),
+				HostKeyCallback: HostKeyCallback(config.Host, strconv.Itoa(config.Port), s.id),
 			}, cleanup, nil
 		}
 	}

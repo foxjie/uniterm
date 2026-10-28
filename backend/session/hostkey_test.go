@@ -12,27 +12,15 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// withTempKnownHosts redirects KnownHostsPath at a temp file for the test by
-// pointing $HOME at a temp dir. Returns the expected known_hosts path and a
-// restore func. The temp dir is created fresh (no known_hosts file yet).
-func withTempKnownHosts(t *testing.T) (string, func()) {
+// withTempKnownHosts redirects KnownHostsPath at a fresh temp dir by pointing
+// the home-directory environment at it. os.UserHomeDir reads HOME on Unix and
+// USERPROFILE on Windows, so both are set (t.Setenv restores them on cleanup).
+func withTempKnownHosts(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".uniterm"), 0700); err != nil {
-		t.Fatalf("mkdir .uniterm: %v", err)
-	}
-	prevHome, hadHome := os.LookupEnv("HOME")
-	if err := os.Setenv("HOME", dir); err != nil {
-		t.Fatalf("setenv HOME: %v", err)
-	}
-	path := filepath.Join(dir, ".uniterm", "known_hosts")
-	return path, func() {
-		if hadHome {
-			_ = os.Setenv("HOME", prevHome)
-		} else {
-			_ = os.Unsetenv("HOME")
-		}
-	}
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	return filepath.Join(dir, ".uniterm", "known_hosts")
 }
 
 // generateTestHostKey generates a fresh ed25519 SSH key pair for testing
@@ -40,7 +28,7 @@ func withTempKnownHosts(t *testing.T) (string, func()) {
 // base64 wire-format encoding (for known_hosts comparison).
 func generateTestHostKey(t *testing.T) (ssh.PublicKey, string) {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("ed25519 GenerateKey: %v", err)
 	}
@@ -48,87 +36,51 @@ func generateTestHostKey(t *testing.T) (ssh.PublicKey, string) {
 	if err != nil {
 		t.Fatalf("NewSignerFromKey: %v", err)
 	}
-	_ = pub // ed25519 pub is derivable from priv; signer.PublicKey is canonical
 	sshPub := signer.PublicKey()
 	return sshPub, base64.StdEncoding.EncodeToString(sshPub.Marshal())
 }
 
-// makeAlternateKey returns a second, distinct PublicKey to simulate a
-// changed server key.
-func makeAlternateKey(t *testing.T) (ssh.PublicKey, string) {
-	t.Helper()
-	return generateTestHostKey(t)
-}
-
-func TestParseHostKeyStrategy(t *testing.T) {
-	cases := []struct {
-		in   string
-		want HostKeyStrategy
-	}{
-		{"", HostKeyAcceptNew},
-		{"accept-new", HostKeyAcceptNew},
-		{"ACCEPT-NEW", HostKeyAcceptNew},
-		{"strict", HostKeyStrict},
-		{"Strict", HostKeyStrict},
-		{"off", HostKeyOff},
-		{"insecure", HostKeyOff},
-		{"disable", HostKeyOff},
-		{"unknown", HostKeyAcceptNew}, // unknown → default
-	}
-	for _, c := range cases {
-		if got := ParseHostKeyStrategy(c.in); got != c.want {
-			t.Errorf("ParseHostKeyStrategy(%q) = %v, want %v", c.in, got, c.want)
-		}
-	}
-}
-
-func TestHostKeyStrategyString(t *testing.T) {
-	if HostKeyAcceptNew.String() != "accept-new" {
-		t.Errorf("AcceptNew.String() = %q, want accept-new", HostKeyAcceptNew.String())
-	}
-	if HostKeyStrict.String() != "strict" {
-		t.Errorf("Strict.String() = %q, want strict", HostKeyStrict.String())
-	}
-	if HostKeyOff.String() != "off" {
-		t.Errorf("Off.String() = %q, want off", HostKeyOff.String())
-	}
-}
-
-func TestHostKeyCallback_OffIsInsecure(t *testing.T) {
-	// HostKeyOff must accept any key (legacy behaviour).
-	cb := HostKeyCallback("h", "22", HostKeyOff)
-	key, _ := generateTestHostKey(t)
-	if err := cb("h", nil, key); err != nil {
-		t.Errorf("Off strategy rejected key: %v", err)
-	}
-}
-
 func TestHostKeyCallback_TOFUFirstConnectRecords(t *testing.T) {
-	path, restore := withTempKnownHosts(t)
-	defer restore()
+	path := withTempKnownHosts(t)
 
 	key, keyB64 := generateTestHostKey(t)
-	cb := HostKeyCallback("example.com", "22", HostKeyAcceptNew)
+	cb := HostKeyCallback("example.com", "22", "")
 	if err := cb("example.com", nil, key); err != nil {
 		t.Fatalf("first connect should pass (TOFU), got: %v", err)
 	}
-	// known_hosts should now contain a line for example.com.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read known_hosts: %v", err)
 	}
 	wantLine := "example.com " + key.Type() + " " + keyB64
 	if !strings.Contains(string(data), wantLine) {
-		t.Errorf("known@known_hosts missing expected line\nwant: %s\nhave: %s", wantLine, data)
+		t.Errorf("known_hosts missing expected line\nwant: %s\nhave: %s", wantLine, data)
+	}
+}
+
+func TestHostKeyCallback_NonStandardPortUsesBracketForm(t *testing.T) {
+	path := withTempKnownHosts(t)
+
+	key, keyB64 := generateTestHostKey(t)
+	cb := HostKeyCallback("example.com", "2222", "")
+	if err := cb("example.com", nil, key); err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read known_hosts: %v", err)
+	}
+	wantLine := "[example.com]:2222 " + key.Type() + " " + keyB64
+	if !strings.Contains(string(data), wantLine) {
+		t.Errorf("known_hosts missing bracketed host:port entry\nwant: %s\nhave: %s", wantLine, data)
 	}
 }
 
 func TestHostKeyCallback_MatchingKeyPasses(t *testing.T) {
-	_, restore := withTempKnownHosts(t)
-	defer restore()
+	withTempKnownHosts(t)
 
 	key, _ := generateTestHostKey(t)
-	cb := HostKeyCallback("example.com", "22", HostKeyAcceptNew)
+	cb := HostKeyCallback("example.com", "22", "")
 	if err := cb("example.com", nil, key); err != nil {
 		t.Fatalf("first connect: %v", err)
 	}
@@ -139,22 +91,18 @@ func TestHostKeyCallback_MatchingKeyPasses(t *testing.T) {
 }
 
 func TestHostKeyCallback_ChangedKeyReturnsError(t *testing.T) {
-	_, restore := withTempKnownHosts(t)
-	defer restore()
+	withTempKnownHosts(t)
 
 	key1, _ := generateTestHostKey(t)
-	cb := HostKeyCallback("example.com", "22", HostKeyAcceptNew)
+	cb := HostKeyCallback("example.com", "22", "")
 	if err := cb("example.com", nil, key1); err != nil {
 		t.Fatalf("first connect: %v", err)
 	}
 
-	key2, _ := makeAlternateKey(t)
-	if key2 == nil {
-		t.Skip("alternate key unavailable")
-	}
+	key2, _ := generateTestHostKey(t)
 	err := cb("example.com", nil, key2)
 	if err == nil {
-		t.Fatalf("changed key should return error, got nil")
+		t.Fatal("changed key should return an error, got nil")
 	}
 	changed, ok := AsHostKeyChangedError(err)
 	if !ok {
@@ -167,123 +115,162 @@ func TestHostKeyCallback_ChangedKeyReturnsError(t *testing.T) {
 		t.Errorf("fingerprints should be non-empty: old=%q new=%q", changed.OldFp, changed.NewFp)
 	}
 	if changed.OldFp == changed.NewFp {
-		t.Errorf("old and new fingerprints should differ")
+		t.Error("old and new fingerprints should differ")
 	}
 }
 
-func TestHostKeyCallback_StrictRejectsChangeWithoutEmit(t *testing.T) {
-	_, restore := withTempKnownHosts(t)
-	defer restore()
+func TestHostKeyCallback_ChangeEmitsEvent(t *testing.T) {
+	withTempKnownHosts(t)
 
-	// Install a sentinel emitter that fails the test if invoked.
-	emitted := false
-	SetHostKeyEmitter(func(name string, payload any) {
-		emitted = true
-	})
-	defer SetHostKeyEmitter(nil)
-
-	key1, _ := generateTestHostKey(t)
-	cb := HostKeyCallback("example.com", "22", HostKeyStrict)
-	if err := cb("example.com", nil, key1); err != nil {
-		t.Fatalf("first connect (strict): %v", err)
-	}
-
-	key2, _ := makeAlternateKey(t)
-	if key2 == nil {
-		t.Skip("alternate key unavailable")
-	}
-	err := cb("example.com", nil, key2)
-	if err == nil {
-		t.Fatalf("strict should reject changed key")
-	}
-	if emitted {
-		t.Errorf("strict strategy must not emit frontend event")
-	}
-}
-
-func TestHostKeyCallback_AcceptNewEmitsEvent(t *testing.T) {
-	_, restore := withTempKnownHosts(t)
-	defer restore()
-
-	emitted := false
 	var emittedName string
-	SetHostKeyEmitter(func(name string, payload any) {
-		emitted = true
+	var payload map[string]any
+	SetHostKeyEmitter(func(name string, p any) {
 		emittedName = name
+		if m, ok := p.(map[string]any); ok {
+			payload = m
+		}
 	})
 	defer SetHostKeyEmitter(nil)
 
 	key1, _ := generateTestHostKey(t)
-	cb := HostKeyCallback("example.com", "2222", HostKeyAcceptNew)
+	cb := HostKeyCallback("example.com", "2222", "sess-1")
 	if err := cb("example.com", nil, key1); err != nil {
 		t.Fatalf("first connect: %v", err)
 	}
 
-	key2, _ := makeAlternateKey(t)
-	if key2 == nil {
-		t.Skip("alternate key unavailable")
-	}
-	_ = cb("example.com", nil, key2) // returns error, but we care about the event
-	if !emitted {
-		t.Errorf("AcceptNew should emit session:hostkey-changed event")
-	}
+	key2, _ := generateTestHostKey(t)
+	_ = cb("example.com", nil, key2) // returns an error; the event is what we assert
 	if emittedName != "session:hostkey-changed" {
-		t.Errorf("emitted event name = %q, want session:hostkey-changed", emittedName)
+		t.Fatalf("emitted event name = %q, want session:hostkey-changed", emittedName)
+	}
+	if payload["sessionId"] != "sess-1" {
+		t.Errorf("payload sessionId = %v, want sess-1", payload["sessionId"])
+	}
+	if payload["oldFp"] == "" || payload["newFp"] == "" {
+		t.Errorf("payload fingerprints should be non-empty: %v", payload)
+	}
+	if payload["oldFp"] == payload["newFp"] {
+		t.Error("payload old and new fingerprints should differ")
 	}
 }
 
 func TestAcceptHostKeyChange_UpdatesKnownHosts(t *testing.T) {
-	_, restore := withTempKnownHosts(t)
-	defer restore()
+	withTempKnownHosts(t)
 
 	key1, _ := generateTestHostKey(t)
-	cb := HostKeyCallback("example.com", "22", HostKeyAcceptNew)
+	cb := HostKeyCallback("example.com", "22", "")
 	if err := cb("example.com", nil, key1); err != nil {
 		t.Fatalf("first connect: %v", err)
 	}
 
-	key2, key2B64 := makeAlternateKey(t)
-	if key2 == nil {
-		t.Skip("alternate key unavailable")
-	}
+	key2, key2B64 := generateTestHostKey(t)
 	// User accepts the new key via the frontend dialog.
 	if err := AcceptHostKeyChange("example.com", "22", key2.Type(), key2B64); err != nil {
 		t.Fatalf("AcceptHostKeyChange: %v", err)
 	}
-	// Now connecting with key2 should pass.
+	// Connecting with key2 should now pass.
 	if err := cb("example.com", nil, key2); err != nil {
 		t.Errorf("after accept, connect with new key should pass, got: %v", err)
 	}
 	// And key1 should now be the one that triggers a change.
 	if err := cb("example.com", nil, key1); err == nil {
-		t.Errorf("after accept, old key should now be rejected")
+		t.Error("after accept, the old key should now be rejected")
 	}
 }
 
-func TestKnownHostsKey_PortFormatting(t *testing.T) {
-	if got := knownHostsKey("h", "22"); got != "h" {
-		t.Errorf("port 22 should drop bracket notation: got %q", got)
+func TestAcceptHostKeyOnce_AllowsOneConnectionWithoutRecording(t *testing.T) {
+	path := withTempKnownHosts(t)
+
+	key1, _ := generateTestHostKey(t)
+	cb := HostKeyCallback("example.com", "22", "")
+	if err := cb("example.com", nil, key1); err != nil {
+		t.Fatalf("first connect: %v", err)
 	}
-	if got := knownHostsKey("h", ""); got != "h" {
-		t.Errorf("empty port should drop bracket notation: got %q", got)
+
+	key2, key2B64 := generateTestHostKey(t)
+	if err := cb("example.com", nil, key2); err == nil {
+		t.Fatal("changed key should be rejected before the one-shot grant")
 	}
-	if got := knownHostsKey("h", "2222"); got != "[h]:2222" {
-		t.Errorf("non-22 port should use [host]:port: got %q", got)
+
+	// User picks "connect once" in the dialog: grant a one-shot bypass for
+	// exactly this key, then reconnect.
+	if err := AcceptHostKeyOnce("example.com", "22", key2B64); err != nil {
+		t.Fatalf("AcceptHostKeyOnce: %v", err)
+	}
+	if err := cb("example.com", nil, key2); err != nil {
+		t.Errorf("one-shot bypass should let the granted key through, got: %v", err)
+	}
+	// The bypass must not have written anything to known_hosts.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read known_hosts: %v", err)
+	}
+	if strings.Contains(string(data), key2B64) {
+		t.Error("one-shot bypass must not update known_hosts")
+	}
+	// It is one-shot: the next connection with the same key is rejected again,
+	// and the original key still verifies cleanly.
+	if err := cb("example.com", nil, key2); err == nil {
+		t.Error("bypass should be consumed after a single use")
+	}
+	if err := cb("example.com", nil, key1); err != nil {
+		t.Errorf("original key should keep passing, got: %v", err)
 	}
 }
 
-func TestResolveHostKeyStrategy_ConfigOverridesDefault(t *testing.T) {
-	prev := GetDefaultHostKeyStrategy()
-	defer SetDefaultHostKeyStrategy(prev)
+func TestAcceptHostKeyOnce_RejectsUngrantedKey(t *testing.T) {
+	withTempKnownHosts(t)
 
-	SetDefaultHostKeyStrategy(HostKeyStrict)
-	if got := ResolveHostKeyStrategy(""); got != HostKeyStrict {
-		t.Errorf("empty config should use default strict, got %v", got)
+	key1, _ := generateTestHostKey(t)
+	cb := HostKeyCallback("example.com", "22", "")
+	if err := cb("example.com", nil, key1); err != nil {
+		t.Fatalf("first connect: %v", err)
 	}
-	if got := ResolveHostKeyStrategy("off"); got != HostKeyOff {
-		t.Errorf("config off should override default, got %v", got)
+
+	// Grant a bypass for key2, then present key3: must still be rejected.
+	_, key2B64 := generateTestHostKey(t)
+	if err := AcceptHostKeyOnce("example.com", "22", key2B64); err != nil {
+		t.Fatalf("AcceptHostKeyOnce: %v", err)
 	}
-	if got := ResolveHostKeyStrategy("accept-new"); got != HostKeyAcceptNew {
-		t.Errorf("config accept-new should override default, got %v", got)
+	key3, _ := generateTestHostKey(t)
+	if err := cb("example.com", nil, key3); err == nil {
+		t.Error("a key other than the granted one must stay rejected")
+	}
+}
+
+func TestAcceptHostKeyChange_RejectsInvalidKey(t *testing.T) {
+	withTempKnownHosts(t)
+
+	if err := AcceptHostKeyChange("example.com", "22", "ssh-ed25519", "not-a-valid-key"); err == nil {
+		t.Fatal("AcceptHostKeyChange should reject a malformed key")
+	}
+	// Nothing should have been written.
+	path, err := KnownHostsPath()
+	if err != nil {
+		t.Fatalf("KnownHostsPath: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("known_hosts should not exist after a rejected accept, stat err: %v", err)
+	}
+}
+
+func TestHostKeyCallback_CorruptKnownHostsRecovers(t *testing.T) {
+	path := withTempKnownHosts(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("garbage line\n\xff\xfe broken base64 !!!\n"), 0600); err != nil {
+		t.Fatalf("seed corrupt known_hosts: %v", err)
+	}
+
+	// A corrupt file must not wedge the connection: first connect re-records.
+	key, keyB64 := generateTestHostKey(t)
+	cb := HostKeyCallback("example.com", "22", "")
+	if err := cb("example.com", nil, key); err != nil {
+		t.Fatalf("first connect over corrupt known_hosts should pass, got: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), keyB64) {
+		t.Errorf("known_hosts should contain the new key after recovery: %q (%v)", data, err)
 	}
 }

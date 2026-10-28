@@ -240,6 +240,20 @@ func (a *App) ServiceStartup(ctx context.Context, options application.ServiceOpt
 	a.containerManager.SetEventEmitter(func(name string, payload any) {
 		a.emit(name, payload)
 	})
+	// Host key change events: resolve the sessionId→panel binding so the
+	// frontend dialog can offer "accept and reconnect" on the right panel.
+	session.SetHostKeyEmitter(func(name string, payload any) {
+		if m, ok := payload.(map[string]any); ok {
+			if sid, _ := m["sessionId"].(string); sid != "" {
+				a.panelLogMu.Lock()
+				if pid := a.sessionToPanel[sid]; pid != "" {
+					m["panelId"] = pid
+				}
+				a.panelLogMu.Unlock()
+			}
+		}
+		a.emit(name, payload)
+	})
 
 	// Init logger first so subsequent log.Writef calls actually write
 	if err := log.Init(); err != nil {

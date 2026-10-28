@@ -9,58 +9,22 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ys-ll/uniterm/backend/log"
 	"golang.org/x/crypto/ssh"
 )
 
-// HostKeyStrategy 控制 SSH 主机密钥校验策略。
-type HostKeyStrategy int
-
-const (
-	// HostKeyAcceptNew 是默认策略：首次连接记录指纹（TOFU），变更时返回
-	// *HostKeyChangedError 并通过事件发射器通知前端弹窗确认。
-	HostKeyAcceptNew HostKeyStrategy = iota
-	// HostKeyStrict 严格模式：首次连接仍记录指纹，但变更时直接拒绝
-	// （不发射前端事件，错误中仍含旧/新指纹便于日志排查）。
-	HostKeyStrict
-	// HostKeyOff 关闭校验，等价于 ssh.InsecureIgnoreHostKey()，保留旧行为。
-	HostKeyOff
-)
-
-// ParseHostKeyStrategy 将字符串转为 HostKeyStrategy。
-// 空串与未知值均回退到 HostKeyAcceptNew，保证默认安全。
-func ParseHostKeyStrategy(s string) HostKeyStrategy {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "strict":
-		return HostKeyStrict
-	case "off", "insecure", "disable", "disabled":
-		return HostKeyOff
-	default:
-		return HostKeyAcceptNew
-	}
-}
-
-// String 返回策略的小写标识，用于 JSON 持久化与前端展示。
-func (s HostKeyStrategy) String() string {
-	switch s {
-	case HostKeyStrict:
-		return "strict"
-	case HostKeyOff:
-		return "off"
-	default:
-		return "accept-new"
-	}
-}
-
-// HostKeyChangedError 描述一次主机密钥变更。导出字段供前端事件 payload 序列化。
+// HostKeyChangedError describes one host key mismatch. The exported fields
+// are serialized into the frontend event payload.
 type HostKeyChangedError struct {
 	Host      string `json:"host"`
 	Port      string `json:"port"`
+	SessionID string `json:"sessionId"`
 	KeyType   string `json:"keyType"`
-	OldFp     string `json:"oldFp"`     // SHA256 指纹（ssh.FingerprintSHA256 格式）
-	NewFp     string `json:"newFp"`     // SHA256 指纹
-	OldKeyB64 string `json:"oldKeyB64"` // base64(SSH wire format)，便于前端展示与调试
+	OldFp     string `json:"oldFp"` // SHA256 fingerprint (ssh.FingerprintSHA256 format)
+	NewFp     string `json:"newFp"` // SHA256 fingerprint
+	OldKeyB64 string `json:"oldKeyB64"`
 	NewKeyB64 string `json:"newKeyB64"`
 }
 
@@ -69,29 +33,44 @@ func (e *HostKeyChangedError) Error() string {
 		e.Host, e.Port, e.KeyType, e.OldFp, e.NewFp)
 }
 
-// Is 使 errors.Is/As 能识别 host key 变更错误。
+// Is lets errors.Is/As recognize host key change errors.
 func (e *HostKeyChangedError) Is(target error) bool {
 	_, ok := target.(*HostKeyChangedError)
 	return ok
 }
 
-// hostKeyEmitterFunc 是 App 层注入的事件发射器签名，用于在变更时通知
-// 前端弹出确认对话框。
+// hostKeyEmitterFunc is the event emitter signature injected by the App
+// layer; it fires when a key change should surface a frontend dialog.
 type hostKeyEmitterFunc = func(name string, payload any)
 
 var (
-	// hostKeyMu 串行化 known_hosts 文件读写，避免并发连接互相覆盖。
+	// hostKeyMu serializes known_hosts file access so concurrent
+	// connections cannot clobber each other's entries.
 	hostKeyMu sync.Mutex
 
 	hostKeyEmitterMu sync.RWMutex
 	hostKeyEmitter   hostKeyEmitterFunc
-
-	defaultStrategyMu sync.RWMutex
-	defaultStrategy   = HostKeyAcceptNew
 )
 
-// SetHostKeyEmitter 注入 Wails 事件发射器。由 app.go 启动时调用一次。
-// 传入 nil 可清除（主要用于测试）。
+// onceGrant is a one-shot bypass recorded by the change dialog ("connect
+// once, don't save"): the exact key shown to the user is allowed through a
+// single time without touching known_hosts.
+type onceGrant struct {
+	keyB64  string
+	granted time.Time
+}
+
+const (
+	onceGrantTTL = 10 * time.Minute
+)
+
+var (
+	// onceGrants is guarded by hostKeyMu, same as the known_hosts file.
+	onceGrants = map[string]onceGrant{}
+)
+
+// SetHostKeyEmitter injects the Wails event emitter. Called once by the App
+// layer at startup. Passing nil clears it (mainly for tests).
 func SetHostKeyEmitter(emitter hostKeyEmitterFunc) {
 	hostKeyEmitterMu.Lock()
 	defer hostKeyEmitterMu.Unlock()
@@ -104,22 +83,8 @@ func getHostKeyEmitter() hostKeyEmitterFunc {
 	return hostKeyEmitter
 }
 
-// SetDefaultHostKeyStrategy 设置全局默认策略（用户在设置页选择的值）。
-// app.go 在启动和设置变更时调用。
-func SetDefaultHostKeyStrategy(s HostKeyStrategy) {
-	defaultStrategyMu.Lock()
-	defer defaultStrategyMu.Unlock()
-	defaultStrategy = s
-}
-
-// GetDefaultHostKeyStrategy 返回当前全局默认策略。
-func GetDefaultHostKeyStrategy() HostKeyStrategy {
-	defaultStrategyMu.RLock()
-	defer defaultStrategyMu.RUnlock()
-	return defaultStrategy
-}
-
-// KnownHostsPath 返回 ~/.uniterm/known_hosts 的绝对路径。导出以便测试与管理。
+// KnownHostsPath returns the absolute path of ~/.uniterm/known_hosts.
+// Exported so tests and management tools can locate the file.
 func KnownHostsPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -128,7 +93,8 @@ func KnownHostsPath() (string, error) {
 	return filepath.Join(home, ".uniterm", "known_hosts"), nil
 }
 
-// knownHostsKey 构造 known_hosts 行的 host 列。OpenSSH 风格：非 22 端口用 [host]:port。
+// knownHostsKey builds the host column of a known_hosts line, OpenSSH
+// style: non-22 ports use the [host]:port form.
 func knownHostsKey(host, port string) string {
 	if port == "" || port == "22" {
 		return host
@@ -136,31 +102,25 @@ func knownHostsKey(host, port string) string {
 	return fmt.Sprintf("[%s]:%s", host, port)
 }
 
-// HostKeyCallback 返回 SSH 主机密钥校验回调。
-//
-//   - HostKeyOff：等价 ssh.InsecureIgnoreHostKey()，保留旧行为。
-//   - HostKeyAcceptNew（默认）：首次连接记录指纹（TOFU），变更时返回
-//     *HostKeyChangedError 并通过事件发射器通知前端弹窗确认。
-//   - HostKeyStrict：首次连接仍记录指纹，变更时直接拒绝（不通知前端）。
-//
-// host/port 用于在 known_hosts 中定位条目；hostname 是 ssh 库传入的拨号地址，仅用于日志。
-func HostKeyCallback(host, port string, strategy HostKeyStrategy) ssh.HostKeyCallback {
-	if strategy == HostKeyOff {
-		return ssh.InsecureIgnoreHostKey()
-	}
-	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		return verifyHostKey(host, port, strategy, key)
+// HostKeyCallback returns the TOFU host key verification callback. host/port
+// locate the known_hosts entry; sessionID (optional) is carried in the change
+// event payload so the frontend can reconnect the failed session after the
+// user accepts the new key.
+func HostKeyCallback(host, port, sessionID string) ssh.HostKeyCallback {
+	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		return verifyHostKey(host, port, sessionID, key)
 	}
 }
 
-// verifyHostKey 实现 TOFU 校验核心逻辑。调用方必须已持有 hostKeyMu。
-func verifyHostKey(host, port string, strategy HostKeyStrategy, newKey ssh.PublicKey) error {
+// verifyHostKey implements the TOFU verification core.
+func verifyHostKey(host, port, sessionID string, newKey ssh.PublicKey) error {
 	hostKeyMu.Lock()
 	defer hostKeyMu.Unlock()
 
 	path, err := KnownHostsPath()
 	if err != nil {
-		// 拿不到 home 目录是环境异常，拒绝连接比放行更安全。
+		// Failing to resolve the home directory is an environment problem;
+		// refusing the connection is safer than letting any key through.
 		return fmt.Errorf("hostkey: resolve known_hosts path: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -172,56 +132,68 @@ func verifyHostKey(host, port string, strategy HostKeyStrategy, newKey ssh.Publi
 	newFp := ssh.FingerprintSHA256(newKey)
 	lookupKey := knownHostsKey(host, port)
 
+	// One-shot bypass: the user accepted this exact key in the change dialog
+	// for a single connection without recording it ("connect once"). The
+	// grant is consumed on use and expires after a while.
+	if g, ok := onceGrants[lookupKey]; ok {
+		if time.Since(g.granted) > onceGrantTTL {
+			delete(onceGrants, lookupKey)
+		} else if g.keyB64 == newKeyB64 {
+			delete(onceGrants, lookupKey)
+			return nil
+		}
+	}
+
 	oldKeyB64, oldKey, err := lookupKnownHostKey(path, lookupKey, keyType)
 	if err != nil {
-		// 文件损坏不应当阻断首次连接：记录日志后按"未记录"处理，
-		// 让用户能继续连上并重新写入新指纹，而不是被旧数据卡死。
+		// A corrupt file must not wedge the user out of their hosts: log it
+		// and treat as "not recorded" so the new fingerprint can be written.
 		log.Writef("hostkey: read %s failed (%v); treating as first connect", path, err)
 		oldKeyB64, oldKey = "", nil
 	}
 
 	if oldKey == nil {
-		// 首次连接：记录并放行（TOFU）。
+		// First connection: record and allow (TOFU).
 		if err := appendKnownHostKey(path, lookupKey, keyType, newKeyB64); err != nil {
 			return fmt.Errorf("hostkey: write %s: %w", path, err)
 		}
 		return nil
 	}
 
-	oldFp := ssh.FingerprintSHA256(oldKey)
 	if oldKeyB64 == newKeyB64 {
-		// 指纹匹配：放行。
+		// Fingerprint matches: allow.
 		return nil
 	}
 
-	// 变更：构造错误。AcceptNew 通知前端弹窗；Strict 直接拒绝。
+	// Key changed: reject and notify the frontend so the user can confirm
+	// the new fingerprint and reconnect.
 	changed := &HostKeyChangedError{
 		Host:      host,
 		Port:      port,
+		SessionID: sessionID,
 		KeyType:   keyType,
-		OldFp:     oldFp,
+		OldFp:     ssh.FingerprintSHA256(oldKey),
 		NewFp:     newFp,
 		OldKeyB64: oldKeyB64,
 		NewKeyB64: newKeyB64,
 	}
-	if strategy == HostKeyAcceptNew {
-		if emitter := getHostKeyEmitter(); emitter != nil {
-			emitter("session:hostkey-changed", map[string]any{
-				"host":      changed.Host,
-				"port":      changed.Port,
-				"keyType":   changed.KeyType,
-				"oldFp":     changed.OldFp,
-				"newFp":     changed.NewFp,
-				"oldKeyB64": changed.OldKeyB64,
-				"newKeyB64": changed.NewKeyB64,
-			})
-		}
+	if emitter := getHostKeyEmitter(); emitter != nil {
+		emitter("session:hostkey-changed", map[string]any{
+			"host":      changed.Host,
+			"port":      changed.Port,
+			"sessionId": changed.SessionID,
+			"keyType":   changed.KeyType,
+			"oldFp":     changed.OldFp,
+			"newFp":     changed.NewFp,
+			"oldKeyB64": changed.OldKeyB64,
+			"newKeyB64": changed.NewKeyB64,
+		})
 	}
 	return changed
 }
 
-// lookupKnownHostKey 在 known_hosts 文件中查找 host+keyType 对应的 base64 公钥。
-// 返回 (keyB64, parsedKey, error)。未找到时返回 ("", nil, nil)。
+// lookupKnownHostKey finds the base64 public key recorded for host+keyType.
+// Returns (keyB64, parsedKey, error); ("", nil, nil) when not found.
 func lookupKnownHostKey(path, host, keyType string) (string, ssh.PublicKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -256,7 +228,7 @@ func lookupKnownHostKey(path, host, keyType string) (string, ssh.PublicKey, erro
 	return "", nil, nil
 }
 
-// appendKnownHostKey 追加一条记录到 known_hosts 文件。
+// appendKnownHostKey appends one entry to the known_hosts file.
 func appendKnownHostKey(path, host, keyType, keyB64 string) error {
 	line := fmt.Sprintf("%s %s %s\n", host, keyType, keyB64)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
@@ -268,12 +240,17 @@ func appendKnownHostKey(path, host, keyType, keyB64 string) error {
 	return err
 }
 
-// AcceptHostKeyChange 用新公钥替换 known_hosts 中 host 的旧记录。
-// 前端用户在"主机密钥变更"对话框点击"接受并继续"时调用。
-// 传入的 newKeyB64 是 base64 编码的 SSH wire format 公钥。
+// AcceptHostKeyChange replaces the known_hosts entry for host with the new
+// public key. Called from the App layer after the user confirms a host key
+// change in the frontend dialog. newKeyB64 is the base64-encoded SSH wire
+// format public key delivered with the change event.
 func AcceptHostKeyChange(host, port, keyType, newKeyB64 string) error {
 	hostKeyMu.Lock()
 	defer hostKeyMu.Unlock()
+
+	if _, _, err := parseHostKeyB64(newKeyB64); err != nil {
+		return fmt.Errorf("hostkey: invalid key: %w", err)
+	}
 
 	path, err := KnownHostsPath()
 	if err != nil {
@@ -286,7 +263,36 @@ func AcceptHostKeyChange(host, port, keyType, newKeyB64 string) error {
 	return replaceKnownHostKey(path, lookupKey, keyType, newKeyB64)
 }
 
-// replaceKnownHostKey 替换 known_hosts 中 host+keyType 的条目；不存在则追加。
+// AcceptHostKeyOnce records a one-shot bypass for host:port, allowing the
+// given key through a single connection without writing it to known_hosts.
+// Called from the App layer when the user picks "connect once, don't save"
+// in the change dialog. The grant is bound to the exact key displayed in the
+// dialog and expires after onceGrantTTL.
+func AcceptHostKeyOnce(host, port, keyB64 string) error {
+	if _, _, err := parseHostKeyB64(keyB64); err != nil {
+		return fmt.Errorf("hostkey: invalid key: %w", err)
+	}
+	hostKeyMu.Lock()
+	defer hostKeyMu.Unlock()
+	onceGrants[knownHostsKey(host, port)] = onceGrant{keyB64: keyB64, granted: time.Now()}
+	return nil
+}
+
+// parseHostKeyB64 validates a base64-encoded SSH wire format public key.
+func parseHostKeyB64(keyB64 string) (ssh.PublicKey, []byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(keyB64)
+	if err != nil {
+		return nil, nil, err
+	}
+	parsed, err := ssh.ParsePublicKey(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return parsed, raw, nil
+}
+
+// replaceKnownHostKey swaps the host+keyType entry in the known_hosts file;
+// appends one when absent.
 func replaceKnownHostKey(path, host, keyType, newKeyB64 string) error {
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -300,26 +306,18 @@ func replaceKnownHostKey(path, host, keyType, newKeyB64 string) error {
 		}
 		fields := strings.Fields(trimmed)
 		if len(fields) >= 3 && fields[0] == host && fields[1] == keyType {
-			continue // 删除旧条目
+			continue // drop the stale entry
 		}
-		kept = append(kept, line)
+		kept = append(kept, trimmed)
 	}
 	kept = append(kept, fmt.Sprintf("%s %s %s", host, keyType, newKeyB64))
 	content := strings.Join(kept, "\n") + "\n"
 	return os.WriteFile(path, []byte(content), 0600)
 }
 
-// ResolveHostKeyStrategy 解析有效的 host key 策略：非空 config 值优先，否则用全局默认。
-// 各 SSH session 在构造 ClientConfig 时调用本函数。
-func ResolveHostKeyStrategy(configStrategy string) HostKeyStrategy {
-	if s := strings.TrimSpace(configStrategy); s != "" {
-		return ParseHostKeyStrategy(s)
-	}
-	return GetDefaultHostKeyStrategy()
-}
-
-// AsHostKeyChangedError 若 err 是 *HostKeyChangedError 则返回它和 true。
-// 便于 App 层在 failSessionConnect 中识别并附加更友好的终端提示。
+// AsHostKeyChangedError returns the *HostKeyChangedError inside err and
+// true when err carries one, for the App layer to render friendly terminal
+// messages.
 func AsHostKeyChangedError(err error) (*HostKeyChangedError, bool) {
 	var changed *HostKeyChangedError
 	if errors.As(err, &changed) {
