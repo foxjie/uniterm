@@ -288,7 +288,10 @@ async function startClient(proxyUrl: string, desktopSizeOverride?: RdpDesktopSiz
     const { username, domain } = splitDomainUser(props.config)
     const size = desktopSizeOverride ?? resolveDesktopSize()
     lastResizeRequest = desktopSizeOverride ?? null
-    lastScaleFactor = null
+    // The connect-time scale goes into the initial Display Control monitor
+    // layout via the desktop_scale_factor extension below, so seed the
+    // dedupe state with it: the first adaptive probe must not resend it.
+    lastScaleFactor = isAdaptive() ? rdpScaleFactor(displayPixelRatio.value) : null
     wigglePending = null
 
     // proxyUrl: ws://127.0.0.1:<port>/<token> — the token path doubles as
@@ -311,7 +314,15 @@ async function startClient(proxyUrl: string, desktopSizeOverride?: RdpDesktopSiz
     builder.extension(new mod.Extension('autologon', !!props.config.password))
     // Servers with Display Control resize in place; older servers use the
     // reconnect fallback when the canvas does not reach the requested size.
-    if (isAdaptive()) builder.extension(new mod.Extension('display_control', true))
+    // The DPI scale is sent inside the initial Display Control monitor layout
+    // (desktop_scale_factor extension in the WASM build), so the server
+    // applies it at session start like mstsc does — no mid-session re-render.
+    if (isAdaptive()) {
+      builder.extension(new mod.Extension('display_control', true))
+      if (lastScaleFactor !== null) {
+        builder.extension(new mod.Extension('desktop_scale_factor', lastScaleFactor))
+      }
+    }
     builder.setCursorStyleCallback(onCursorStyle)
     builder.setCursorStyleCallbackContext(null)
     builder.remoteClipboardChangedCallback((data: any) => {
@@ -874,17 +885,15 @@ function isAdaptive(): boolean {
   return !!cfg && (cfg.rdpFixedWidth === -2 || cfg.rdpFixedHeight === -2 || (!cfg.rdpFixedWidth && !cfg.rdpFixedHeight))
 }
 
-// Adaptive-mode connect size: the viewport's physical pixels minus 2. The
-// session starts sharp at (visually) the right size; the 2-pixel gap then
-// makes the very first Display Control resize a real bitmap change, which is
-// the only kind of PDU Windows applies a DPI scale to — one PDU, one repaint,
-// final size exact. (Windows silently ignores scale-only PDUs, so starting at
-// the exact size would need a 2px wiggle round-trip and repaint twice.)
+// Adaptive-mode connect size: the viewport's physical pixels, exact. The DPI
+// scale rides the WASM build's desktop_scale_factor extension, which sends it
+// inside the initial Display Control monitor layout during the connection
+// handshake (mstsc parity): the session is born at the right size AND DPI, no
+// mid-session resize and no repaint at all.
 function adaptiveDesktopSize(): RdpDesktopSize | null {
   const bounds = viewportEl.value?.getBoundingClientRect()
   if (!bounds || bounds.width <= 0 || bounds.height <= 0) return null
-  const size = adaptiveRdpSize(bounds.width, bounds.height, displayPixelRatio.value)
-  return { width: Math.max(640, size.width - 2), height: size.height }
+  return adaptiveRdpSize(bounds.width, bounds.height, displayPixelRatio.value)
 }
 
 function currentDesktopSize(): RdpDesktopSize | null {
