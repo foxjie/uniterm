@@ -162,8 +162,12 @@ func main() {
 		settingsCh <- loadSavedSettings()
 	}()
 
-	if configDir, err := os.UserConfigDir(); err == nil {
-		ls := store.NewLocalStateStore(filepath.Join(configDir, "uniTerm"))
+	// Resolve the data dir exactly like the runtime stores do (ResolveDataDir):
+	// a portable build persists geometry next to the exe, so a startup read
+	// pinned to the OS default location would restore state this build never
+	// wrote — and ignore the one it did.
+	if dd, err := store.ResolveDataDir(); err == nil && !dd.FirstRun && dd.Path != "" {
+		ls := store.NewLocalStateStore(dd.Path)
 		done := make(chan store.LocalState, 1)
 		go func() {
 			if state, err := ls.Load(); err == nil {
