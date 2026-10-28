@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1277,4 +1278,19 @@ func (a *App) GetDefaultSessionLogDir() string {
 // form's algorithm editor.
 func (a *App) GetSupportedSSHAlgorithms() session.SupportedSSHAlgorithms {
 	return session.GetSupportedSSHAlgorithms()
+}
+
+// AcceptHostKeyChange replaces the known_hosts fingerprint for host:port
+// with the new key after the user confirmed a host key change in the
+// frontend dialog. See session.AcceptHostKeyChange.
+func (a *App) AcceptHostKeyChange(host, keyType, newKeyB64 string, port int) error {
+	return session.AcceptHostKeyChange(host, strconv.Itoa(port), keyType, newKeyB64)
+}
+
+// AcceptHostKeyOnce records a one-shot bypass for host:port, letting the
+// next connection present the given key without recording it in
+// known_hosts ("connect once, don't save" in the change dialog). See
+// session.AcceptHostKeyOnce.
+func (a *App) AcceptHostKeyOnce(host, keyType, newKeyB64 string, port int) error {
+	return session.AcceptHostKeyOnce(host, strconv.Itoa(port), newKeyB64)
 }
