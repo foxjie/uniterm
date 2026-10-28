@@ -69,12 +69,22 @@ export function installTabSnapshotSaver() {
   const panelStore = usePanelStore()
   const localStateStore = useLocalStateStore()
   let timer: ReturnType<typeof setTimeout> | null = null
+  // Tabs in the snapshot last written to disk. When tabs CLOSE, the write
+  // goes out immediately instead of waiting for the debounce: closing the
+  // tabs and then quitting must not leave the old (larger) snapshot behind,
+  // which would make the next start offer tabs the user already closed.
+  // Growth/renames can keep the debounce — a lost write there only costs one
+  // restore offer.
+  let lastSavedCount: number | null = null
   const schedule = () => {
     if (timer) clearTimeout(timer)
-    timer = setTimeout(() => {
+    const removal = lastSavedCount !== null && buildTabSnapshot().tabs.length < lastSavedCount
+    timer = setTimeout(async () => {
       timer = null
-      localStateStore.update({ lastTabsSnapshot: buildTabSnapshot() })
-    }, 1500)
+      const snapshot = buildTabSnapshot()
+      lastSavedCount = snapshot.tabs.length
+      await localStateStore.update({ lastTabsSnapshot: snapshot })
+    }, removal ? 0 : 1500)
   }
   // Deep on tabs: renames, workspace panel membership, lock flags…
   watch(() => tabStore.tabs, schedule, { deep: true })
