@@ -103,10 +103,11 @@ import { CreateSession, CloseSession, FrontendLog, ClipboardGetFiles, ClipboardR
 import { backendErrorText, backendErrorTextOf } from '../utils/backendError'
 import { Events } from '@wailsio/runtime'
 import { usePanelStore } from '../stores/panelStore'
+import { rdpQueueConnect } from '../utils/rdpConnectQueue'
 import { writeClipboard, readClipboardText } from '../composables/useClipboardWrite'
 import { RdpClipboardSync, RdpInputQueue } from '../utils/rdpClipboard'
 import { RdpFileTransfer } from '../utils/rdpFileTransfer'
-import { adaptiveRdpSize, rdpContentRect, rdpPointerPosition, rdpScaleFactor } from '../utils/rdpGeometry'
+import { adaptiveRdpSize, hostDpiSupportFor, rdpContentRect, rdpPointerPosition, rdpScaleFactor, rememberHostDpiSupport } from '../utils/rdpGeometry'
 import type { RdpDesktopSize } from '../utils/rdpGeometry'
 import { queueRemoteKeyboardChange, isRdpPasteKey, REMOTE_KEY_SCANCODES as KEY_SCANCODES } from '../utils/remoteKeyboard'
 import type { NativeRdpKey } from '../utils/remoteKeyboard'
@@ -132,26 +133,34 @@ let keyboardHeartbeat: ReturnType<typeof setInterval> | null = null
 const viewportEl = ref<HTMLDivElement | null>(null)
 const canvasEl = ref<HTMLCanvasElement | null>(null)
 const displayPixelRatio = ref(window.devicePixelRatio || 1)
+// Servers older than the Windows 10 line apply RDP DPI only partially (text
+// rescales, shell icons and the start menu do not). For those, the WASM layer
+// reports support=false and adaptive sizing switches to mRemoteNG's
+// "fit to panel" look: the session runs at the viewport's LOGICAL size with
+// no DPI at all, and the client upscales the bitmap by the display's pixel
+// ratio — visually equivalent to DPI scaling, consistently rendered.
+const serverDpiSupported = ref(true)
+const effectivePixelRatio = computed(() => serverDpiSupported.value ? displayPixelRatio.value : 1)
 const framebufferSize = ref<RdpDesktopSize | null>(null)
 const viewportSize = ref<RdpDesktopSize>({ width: 0, height: 0 })
 const scaleCanvas = computed(() => {
   if (!scaleViewport.value) return false
   if (!isAdaptive() || !framebufferSize.value) return true
-  const target = adaptiveRdpSize(viewportSize.value.width, viewportSize.value.height, displayPixelRatio.value)
+  const target = adaptiveRdpSize(viewportSize.value.width, viewportSize.value.height, effectivePixelRatio.value)
   return framebufferSize.value.width !== target.width || framebufferSize.value.height !== target.height
 })
 const canvasStyle = computed(() => {
   if (scaleCanvas.value || !framebufferSize.value) return undefined
   return {
-    width: `${framebufferSize.value.width / displayPixelRatio.value}px`,
-    height: `${framebufferSize.value.height / displayPixelRatio.value}px`,
+    width: `${framebufferSize.value.width / effectivePixelRatio.value}px`,
+    height: `${framebufferSize.value.height / effectivePixelRatio.value}px`,
   }
 })
 const displayScale = computed(() => {
   if (!framebufferSize.value) return null
   if (!scaleCanvas.value) return 100
   const content = rdpContentRect({ left: 0, top: 0, ...viewportSize.value }, framebufferSize.value, isAdaptive())
-  return content ? Math.round(content.width * displayPixelRatio.value / framebufferSize.value.width * 100) : null
+  return content ? Math.round(content.width * effectivePixelRatio.value / framebufferSize.value.width * 100) : null
 })
 
 const statusResolution = computed(() => {
@@ -266,7 +275,8 @@ function splitDomainUser(cfg: ConnectionConfig): { username: string; domain: str
 
 async function startClient(proxyUrl: string, desktopSizeOverride?: RdpDesktopSize) {
   if (started || !props.config || !canvasEl.value) return
-  if (clientGeneration === 0) activeCredSSP = props.config.rdpEnableNLA ?? false
+  const config = props.config
+  if (clientGeneration === 0) activeCredSSP = config.rdpEnableNLA ?? false
   started = true
   const generation = ++clientGeneration
   status.value = 'connecting'
@@ -283,86 +293,118 @@ async function startClient(proxyUrl: string, desktopSizeOverride?: RdpDesktopSiz
   }, CONNECT_TIMEOUT)
 
   try {
-    const mod = await loadWasm()
-    if (generation !== clientGeneration) return
-    const { username, domain } = splitDomainUser(props.config)
-    const size = desktopSizeOverride ?? resolveDesktopSize()
-    lastResizeRequest = desktopSizeOverride ?? null
-    // The connect-time scale goes into the initial Display Control monitor
-    // layout via the desktop_scale_factor extension below, so seed the
-    // dedupe state with it: the first adaptive probe must not resend it.
-    lastScaleFactor = isAdaptive() ? rdpScaleFactor(displayPixelRatio.value) : null
-    wigglePending = null
+    // Wasm registration + connect runs one tab at a time app-wide:
+    // see rdpQueueConnect above.
+    const established = await rdpQueueConnect(async () => {
+      if (generation !== clientGeneration || !started) return null
+      const mod = await loadWasm()
+      if (generation !== clientGeneration) return null
+      const { username, domain } = splitDomainUser(config)
+      // Hosts already known to apply DPI only partially start in fit-to-panel
+      // mode from the very first frame (logical size, no scale at all).
+      serverDpiSupported.value = hostDpiSupportFor(config.host)
+      const size = desktopSizeOverride ?? resolveDesktopSize()
+      lastResizeRequest = desktopSizeOverride ?? null
+      // The connect-time scale goes into the initial Display Control monitor
+      // layout via the desktop_scale_factor extension below, so seed the
+      // dedupe state with it: the first adaptive probe must not resend it.
+      lastScaleFactor = isAdaptive() ? rdpScaleFactor(effectivePixelRatio.value) : null
+      wigglePending = null
 
-    // proxyUrl: ws://127.0.0.1:<port>/<token> — the token path doubles as
-    // the gateway auth token the RDCleanPath handshake must echo.
-    const url = new URL(proxyUrl)
-    const authToken = url.pathname.slice(1)
+      // proxyUrl: ws://127.0.0.1:<port>/<token> — the token path doubles as
+      // the gateway auth token the RDCleanPath handshake must echo.
+      const url = new URL(proxyUrl)
+      const authToken = url.pathname.slice(1)
 
-    const builder = new mod.SessionBuilder()
-      .username(username)
-      .password(props.config.password || '')
-      .destination(props.config.host)
-      .proxyAddress(proxyUrl)
-      .authToken(authToken)
-      .desktopSize(new mod.DesktopSize(size.width, size.height))
-      .renderCanvas(canvasEl.value)
-    if (domain) builder.serverDomain(domain)
-    builder.extension(new mod.Extension('enable_credssp', activeCredSSP))
-    // Auto-logon with the saved credentials (mstsc saved-creds equivalent) —
-    // requires the autologon extension patch in the WASM build.
-    builder.extension(new mod.Extension('autologon', !!props.config.password))
-    // Servers with Display Control resize in place; older servers use the
-    // reconnect fallback when the canvas does not reach the requested size.
-    // The DPI scale is sent inside the initial Display Control monitor layout
-    // (desktop_scale_factor extension in the WASM build), so the server
-    // applies it at session start like mstsc does — no mid-session re-render.
-    if (isAdaptive()) {
-      builder.extension(new mod.Extension('display_control', true))
-      if (lastScaleFactor !== null) {
-        builder.extension(new mod.Extension('desktop_scale_factor', lastScaleFactor))
+      const builder = new mod.SessionBuilder()
+        .username(username)
+        .password(config.password || '')
+        .destination(config.host)
+        .proxyAddress(proxyUrl)
+        .authToken(authToken)
+        .desktopSize(new mod.DesktopSize(size.width, size.height))
+        .renderCanvas(canvasEl.value)
+      if (domain) builder.serverDomain(domain)
+      builder.extension(new mod.Extension('enable_credssp', activeCredSSP))
+      // Auto-logon with the saved credentials (mstsc saved-creds equivalent) —
+      // requires the autologon extension patch in the WASM build.
+      builder.extension(new mod.Extension('autologon', !!config.password))
+      // Servers with Display Control resize in place; older servers use the
+      // reconnect fallback when the canvas does not reach the requested size.
+      // The DPI scale is sent inside the initial Display Control monitor layout
+      // (desktop_scale_factor extension in the WASM build), so the server
+      // applies it at session start like mstsc does — no mid-session re-render.
+      if (isAdaptive()) {
+        builder.extension(new mod.Extension('display_control', true))
+        if (lastScaleFactor !== null) {
+          builder.extension(new mod.Extension('desktop_scale_factor', lastScaleFactor))
+        }
       }
-    }
-    builder.setCursorStyleCallback(onCursorStyle)
-    builder.setCursorStyleCallbackContext(null)
-    builder.remoteClipboardChangedCallback((data: any) => {
-      if (generation === clientGeneration) onRemoteClipboard(data)
-      else data?.free?.()
-    })
-    builder.forceClipboardUpdateCallback(() => {
-      if (generation !== clientGeneration) return
-      clipboardSync?.requestFormatList().catch(error => rdpLog(`clipboard initialization failed: ${describeError(error)}`))
-    })
-    builder.extension(new mod.Extension('format_list_response_callback', (ok: boolean) => {
-      if (generation !== clientGeneration) return
-      if (ok) clipboardAck?.resolve()
-      else clipboardAck?.reject(new Error('Remote rejected clipboard formats'))
-    }))
-    builder.extension(new mod.Extension('file_contents_request_callback', (request: any) => {
-      if (generation === clientGeneration) fileTransfer?.onRequest(request)
-    }))
-    builder.extension(new mod.Extension('file_contents_response_callback', (response: any) => {
-      if (generation === clientGeneration) fileTransfer?.onResponse(response)
-    }))
-    builder.extension(new mod.Extension('lock_callback', (id: number) => {
-      if (generation === clientGeneration) fileTransfer?.lock(id)
-    }))
-    builder.extension(new mod.Extension('unlock_callback', (id: number) => {
-      if (generation === clientGeneration) fileTransfer?.unlock(id)
-    }))
-    builder.extension(new mod.Extension('locks_expired_callback', (ids: number[]) => {
-      if (generation === clientGeneration) ids.forEach(id => fileTransfer?.unlock(id))
-    }))
-    builder.extension(new mod.Extension('files_available_callback', (files: any[], clipDataId?: number) => {
-      if (generation !== clientGeneration) return
-      const transfer = fileTransfer
-      if (!transfer) return
-      transfer.cancelDownload()
-      clipboardSync?.receiveFiles(() => transfer.download(files, clipDataId))
-        .catch(error => rdpLog(`remote file copy failed: ${describeError(error)}`))
-    }))
+      // The WASM layer reports, from the server's core data version, whether it
+      // applies DPI completely. On partial servers switch to fit-to-panel:
+      // logical-size session, zero scale, client-side upscale.
+      builder.extension(new mod.Extension('dpi_support_callback', (supported: boolean) => {
+        // The server's DPI behavior is a fact about the host, recorded even if
+        // this callback arrives from a generation we already replaced.
+        rememberHostDpiSupport(config.host, supported)
+        if (generation !== clientGeneration) return
+        if (serverDpiSupported.value === supported) return
+        serverDpiSupported.value = supported
+        if (!supported) {
+          rdpLog(`server applies DPI only partially — switching to fit-to-panel (logical size, no scale)`)
+          lastScaleFactor = null
+        } else {
+          // Server (or gateway) upgraded since it was last probed: return to
+          // connect-time DPI instead of trusting the stale cache forever.
+          rdpLog(`server applies DPI fully — re-enabling DPI scaling`)
+        }
+        lastResizeRequest = null
+        requestAdaptiveResize()
+      }))
+      builder.setCursorStyleCallback(onCursorStyle)
+      builder.setCursorStyleCallbackContext(null)
+      builder.remoteClipboardChangedCallback((data: any) => {
+        if (generation === clientGeneration) onRemoteClipboard(data)
+        else data?.free?.()
+      })
+      builder.forceClipboardUpdateCallback(() => {
+        if (generation !== clientGeneration) return
+        clipboardSync?.requestFormatList().catch(error => rdpLog(`clipboard initialization failed: ${describeError(error)}`))
+      })
+      builder.extension(new mod.Extension('format_list_response_callback', (ok: boolean) => {
+        if (generation !== clientGeneration) return
+        if (ok) clipboardAck?.resolve()
+        else clipboardAck?.reject(new Error('Remote rejected clipboard formats'))
+      }))
+      builder.extension(new mod.Extension('file_contents_request_callback', (request: any) => {
+        if (generation === clientGeneration) fileTransfer?.onRequest(request)
+      }))
+      builder.extension(new mod.Extension('file_contents_response_callback', (response: any) => {
+        if (generation === clientGeneration) fileTransfer?.onResponse(response)
+      }))
+      builder.extension(new mod.Extension('lock_callback', (id: number) => {
+        if (generation === clientGeneration) fileTransfer?.lock(id)
+      }))
+      builder.extension(new mod.Extension('unlock_callback', (id: number) => {
+        if (generation === clientGeneration) fileTransfer?.unlock(id)
+      }))
+      builder.extension(new mod.Extension('locks_expired_callback', (ids: number[]) => {
+        if (generation === clientGeneration) ids.forEach(id => fileTransfer?.unlock(id))
+      }))
+      builder.extension(new mod.Extension('files_available_callback', (files: any[], clipDataId?: number) => {
+        if (generation !== clientGeneration) return
+        const transfer = fileTransfer
+        if (!transfer) return
+        transfer.cancelDownload()
+        clipboardSync?.receiveFiles(() => transfer.download(files, clipDataId))
+          .catch(error => rdpLog(`remote file copy failed: ${describeError(error)}`))
+      }))
 
-    const connectedSession = await builder.connect()
+      const connectedSession = await builder.connect()
+      return { mod, connectedSession }
+    })
+    if (!established) return
+    const { mod, connectedSession } = established
     if (generation !== clientGeneration) {
       connectedSession.shutdown()
       connectedSession.free?.()
@@ -761,11 +803,14 @@ function onWheel(e: WheelEvent) {
   try {
     const tx = new wasmModule.InputTransaction()
     tx.addEvent(wasmModule.DeviceEvent.mouseMove(pos.x, pos.y))
+    // RDP's wheelRotation positive direction is opposite to the browser's
+    // deltaY/deltaX (browser positive = scrolled down/right; RDP positive =
+    // wheel tilted forward/up), so invert both axes.
     if (e.deltaY !== 0) {
-      tx.addEvent(wasmModule.DeviceEvent.wheelRotations(true, Math.max(-1000, Math.min(1000, Math.round(e.deltaY))), wasmModule.RotationUnit.Pixel))
+      tx.addEvent(wasmModule.DeviceEvent.wheelRotations(true, Math.max(-1000, Math.min(1000, -Math.round(e.deltaY))), wasmModule.RotationUnit.Pixel))
     }
     if (e.deltaX !== 0) {
-      tx.addEvent(wasmModule.DeviceEvent.wheelRotations(false, Math.max(-1000, Math.min(1000, Math.round(e.deltaX))), wasmModule.RotationUnit.Pixel))
+      tx.addEvent(wasmModule.DeviceEvent.wheelRotations(false, Math.max(-1000, Math.min(1000, -Math.round(e.deltaX))), wasmModule.RotationUnit.Pixel))
     }
     session.applyInputs(tx)
   } catch (_) {}
@@ -893,7 +938,7 @@ function isAdaptive(): boolean {
 function adaptiveDesktopSize(): RdpDesktopSize | null {
   const bounds = viewportEl.value?.getBoundingClientRect()
   if (!bounds || bounds.width <= 0 || bounds.height <= 0) return null
-  return adaptiveRdpSize(bounds.width, bounds.height, displayPixelRatio.value)
+  return adaptiveRdpSize(bounds.width, bounds.height, effectivePixelRatio.value)
 }
 
 function currentDesktopSize(): RdpDesktopSize | null {
@@ -962,13 +1007,15 @@ function requestAdaptiveResize() {
   // Servers without Display Control cannot apply a DPI scale; keep their
   // fallback behavior and do not treat the missing scale as a pending change,
   // or the reconnect path would loop.
-  const scale = displayControlUsable === false ? null : rdpScaleFactor(displayPixelRatio.value)
+  const scale = displayControlUsable === false || !serverDpiSupported.value
+    ? null
+    : rdpScaleFactor(displayPixelRatio.value)
   // The layout carries the viewport's *physical* size; the DPI scale rides
   // along. Window drags always change the bitmap and apply directly. A
   // scale-only change (bitmap already at the target size) does not: Windows
   // silently ignores PDUs that leave the bitmap untouched, so deliver the
   // scale inside a 2-pixel shrink and bounce back to the exact size after.
-  const exact = adaptiveRdpSize(bounds.width, bounds.height, displayPixelRatio.value)
+  const exact = adaptiveRdpSize(bounds.width, bounds.height, effectivePixelRatio.value)
   let { width, height } = exact
   const cur = currentDesktopSize()
   const wiggleNow = scale !== null && cur !== null &&

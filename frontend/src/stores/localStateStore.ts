@@ -41,6 +41,9 @@ interface LocalState {
   // Open-tabs snapshot for "reopen last session's tabs". Opaque shape
   // (types/tabSnapshot.ts); local-only, never synced.
   lastTabsSnapshot: SavedTabsSnapshot | null
+  // RDP hosts whose DPI behavior was already learned (host → applies DPI
+  // scaling completely). See utils/rdpGeometry rememberHostDpiSupport.
+  hostDpiSupport: Record<string, boolean>
 }
 
 const DEFAULT: LocalState = {
@@ -67,6 +70,7 @@ const DEFAULT: LocalState = {
   sftpDialogDir: '',
   mcp: { ...DEFAULT_MCP_SETTINGS },
   lastTabsSnapshot: null,
+  hostDpiSupport: {},
 } as LocalState
 
 export const useLocalStateStore = defineStore('localState', () => {

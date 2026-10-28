@@ -1,5 +1,41 @@
+import { useLocalStateStore } from '../stores/localStateStore'
+
 export type RdpDesktopSize = { width: number; height: number }
 export type RdpDisplayRect = RdpDesktopSize & { left: number; top: number }
+
+/**
+ * Host → "server applies RDP DPI scaling completely", learned from the WASM
+ * layer after each connect. Shared across tabs so a host known to apply DPI
+ * only partially (pre-Windows 10 servers) starts in fit-to-panel mode —
+ * logical session size, no scale, client-side upscale — from the very first
+ * frame instead of resizing once the server version is discovered.
+ *
+ * Persisted in the local-state store (local_state.json): the server's RDP
+ * protocol version never changes mid-life, so what one connect learns, every
+ * later connect (even after an app restart) starts with — one probing session
+ * per host, ever. Deliberately NOT in WebView2 localStorage: the WebView2
+ * profile is torn down on clean exit and is not reliably persisted.
+ */
+export function hostDpiSupportFor(host: string): boolean {
+  try {
+    return useLocalStateStore().state.hostDpiSupport?.[host] ?? true
+  } catch {
+    // Store not ready: assume full DPI support (the pre-Win10 probe flow).
+    return true
+  }
+}
+
+export function rememberHostDpiSupport(host: string, supported: boolean): void {
+  try {
+    const store = useLocalStateStore()
+    const current = store.state.hostDpiSupport || {}
+    if (current[host] === supported) return
+    // Fire-and-forget: losing this write only costs one probe next connect.
+    void store.update({ hostDpiSupport: { ...current, [host]: supported } })
+  } catch {
+    // Best-effort persistence: the server re-reports capability every connect.
+  }
+}
 
 /** Use the same aligned size for initial negotiation and subsequent resizes. */
 export function adaptiveRdpSize(width: number, height: number, pixelRatio = 1): RdpDesktopSize {

@@ -54,7 +54,18 @@ type LocalState struct {
 	// session's tabs" (issue #937). Opaque JSON written by the frontend
 	// (types/tabSnapshot.ts); local-only, never synced, and holds no
 	// secrets — host references are connectionIds re-resolved at restore.
+	// It deliberately survives a clean exit: closing the program with tabs
+	// open is exactly what the reopen prompt is meant to offer. The frontend
+	// saves immediately when tabs close, so a stale entry never outlives a
+	// quit that left nothing open.
 	LastTabsSnapshot json.RawMessage `json:"lastTabsSnapshot,omitempty"`
+	// HostDpiSupport maps an RDP host to "this server applies desktop DPI
+	// scaling completely" (false = pre-Windows-10 servers that only apply it
+	// partially, so the client uses fit-to-panel instead). Learned from the
+	// server's core-data version after the first connect to each host. Must
+	// live here, not in WebView2 localStorage: the WebView2 profile is
+	// wiped on clean exit by shutdown() and is not reliably persisted.
+	HostDpiSupport map[string]bool `json:"hostDpiSupport,omitempty"`
 }
 
 // AILocalState holds device-local selections, separate from the synced model catalog.
