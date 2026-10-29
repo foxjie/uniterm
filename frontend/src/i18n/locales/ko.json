@@ -2116,5 +2116,6 @@
   "localsrv.s3.hint": "로컬 디렉터리를 제공하는 실험적 S3 호환 서버입니다. 서명 검증이 없는 S3 클라이언트를 사용하세요(예: mc --no-sign-request alias set local http://<host>:<port>/ ; mc ls local).",
   "localsrv.s3.accessKey": "Access key",
   "localsrv.s3.secretKey": "Secret key",
-  "localsrv.s3.keyPlaceholder": "선택 사항"
+  "localsrv.s3.keyPlaceholder": "선택 사항",
+  "terminal.copySingleLine": "한 줄로 복사"
 }

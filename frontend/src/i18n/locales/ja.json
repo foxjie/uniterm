@@ -2116,5 +2116,6 @@
   "localsrv.s3.hint": "ローカルディレクトリを公開する実験的なS3互換サーバー。署名検証なしのS3クライアントを使用してください。例: mc --no-sign-request alias set local http://<host>:<port>/ ; mc ls local",
   "localsrv.s3.accessKey": "Access key",
   "localsrv.s3.secretKey": "Secret key",
-  "localsrv.s3.keyPlaceholder": "オプション"
+  "localsrv.s3.keyPlaceholder": "オプション",
+  "terminal.copySingleLine": "1 行としてコピー"
 }

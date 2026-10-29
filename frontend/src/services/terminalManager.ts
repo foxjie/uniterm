@@ -1,3 +1,4 @@
+import { disposeCommandWraps } from './terminalCommandWrap'
 import { Terminal } from '@xterm/xterm'
 import { Events } from '@wailsio/runtime'
 import { FitAddon } from '@xterm/addon-fit'
@@ -512,6 +513,7 @@ export function releaseTerminal(sessionId: string, ref: string): void {
       setTabProgressForSession(sessionId, null)
       managed.imeDispose?.dispose()
       managed.imeDispose = null
+      disposeCommandWraps(managed.terminal)
       managed.terminal.dispose()
       terminals.delete(sessionId)
     }, 500)
@@ -534,6 +536,7 @@ export function disposeTerminal(sessionId: string): void {
   setTabProgressForSession(sessionId, null)
   managed.imeDispose?.dispose()
   managed.imeDispose = null
+  disposeCommandWraps(managed.terminal)
   managed.terminal.dispose()
   terminals.delete(sessionId)
 }

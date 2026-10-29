@@ -21,6 +21,7 @@
 </template>
 
 <script setup lang="ts">
+import { isLogicalContinuation } from '../services/terminalCommandWrap'
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import type { Terminal } from '@xterm/xterm'
 import { getManagedTerminal } from '../services/terminalManager'
@@ -177,7 +178,7 @@ function compute() {
     lineOffset,
     showTimestamps: props.showTimestamps,
     cursorAbsoluteY: buf.baseY + buf.cursorY,
-    getLine: (n) => buf.getLine(n),
+    getLine: (n) => ({ isWrapped: isLogicalContinuation(t, n) }),
     getMeta: (abs) => {
       // Alternate screen lines are transient — fall back to per-screen
       // positional numbers, no timestamps.

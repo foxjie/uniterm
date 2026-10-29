@@ -2116,5 +2116,6 @@
   "localsrv.s3.hint": "Экспериментальный сервер, совместимый с S3, поверх локального каталога. Используйте S3-клиент без проверки подписи, например: mc --no-sign-request alias set local http://<host>:<port>/ ; mc ls local",
   "localsrv.s3.accessKey": "Access key",
   "localsrv.s3.secretKey": "Secret key",
-  "localsrv.s3.keyPlaceholder": "необязательно"
+  "localsrv.s3.keyPlaceholder": "необязательно",
+  "terminal.copySingleLine": "Копировать одной строкой"
 }

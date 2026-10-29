@@ -2147,5 +2147,6 @@
   "localsrv.s3.hint": "实验性 S3 兼容服务，基于本地目录。使用不做签名校验的 S3 客户端访问，例如：mc --no-sign-request alias set local http://<host>:<端口>/ ; mc ls local",
   "localsrv.s3.accessKey": "Access key",
   "localsrv.s3.secretKey": "Secret key",
-  "localsrv.s3.keyPlaceholder": "可选"
+  "localsrv.s3.keyPlaceholder": "可选",
+  "terminal.copySingleLine": "复制为单行"
 }
