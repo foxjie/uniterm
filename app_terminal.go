@@ -149,17 +149,11 @@ func (a *App) CreateSession(sessionType string, config session.ConnectionConfig)
 
 	a.sessionCaptureFor(s)
 	s.SetOnDataCallback(func(data []byte) {
-		a.emit("session:data", map[string]interface{}{
-			"id":   s.ID(),
-			"data": string(data),
-		})
+		a.emit("session:data", &sessionDataEvent{ID: s.ID(), Data: string(data)})
 	})
 
 	s.SetOnBinaryCallback(func(data []byte) {
-		a.emit("session:binary", map[string]interface{}{
-			"id":   s.ID(),
-			"data": base64.StdEncoding.EncodeToString(data),
-		})
+		a.emit("session:binary", &sessionBinaryEvent{ID: s.ID(), Data: base64.StdEncoding.EncodeToString(data)})
 	})
 
 	s.SetOnStatusChangeCallback(func(status session.SessionStatus) {
@@ -318,10 +312,7 @@ func (a *App) failSessionConnect(s session.Session, err error) {
 			"status":       "error",
 			"errorMessage": err.Error(),
 		})
-		a.emit("session:data", map[string]interface{}{
-			"id":   s.ID(),
-			"data": fmt.Sprintf("\r\n\x1b[31m[Connection failed: %v]\x1b[0m\r\nPress Enter to retry...\r\n", err),
-		})
+		a.emit("session:data", &sessionDataEvent{ID: s.ID(), Data: fmt.Sprintf("\r\n\x1b[31m[Connection failed: %v]\x1b[0m\r\nPress Enter to retry...\r\n", err)})
 	}
 	if a.sessionManager != nil {
 		_ = a.sessionManager.Close(s.ID())
@@ -433,16 +424,10 @@ func (a *App) DuplicateSSHChannel(sourceSessionID string, config session.Connect
 
 	a.sessionCaptureFor(s)
 	s.SetOnDataCallback(func(data []byte) {
-		a.emit("session:data", map[string]interface{}{
-			"id":   s.ID(),
-			"data": string(data),
-		})
+		a.emit("session:data", &sessionDataEvent{ID: s.ID(), Data: string(data)})
 	})
 	s.SetOnBinaryCallback(func(data []byte) {
-		a.emit("session:binary", map[string]interface{}{
-			"id":   s.ID(),
-			"data": base64.StdEncoding.EncodeToString(data),
-		})
+		a.emit("session:binary", &sessionBinaryEvent{ID: s.ID(), Data: base64.StdEncoding.EncodeToString(data)})
 	})
 	s.SetOnStatusChangeCallback(func(status session.SessionStatus) {
 		payload := map[string]interface{}{

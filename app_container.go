@@ -148,10 +148,7 @@ func (a *App) K8sExecSession(connID, namespace, pod, container string) (*session
 	// k8s exec 的 WS 通道适配为通用 PTYStream，与容器 exec 会话统一
 	sess := session.NewContainerExecSession(id, session.NewK8sExecStream(wsConn))
 	sess.SetOnDataCallback(func(data []byte) {
-		a.emit("session:data", map[string]interface{}{
-			"id":   sess.ID(),
-			"data": string(data),
-		})
+		a.emit("session:data", &sessionDataEvent{ID: sess.ID(), Data: string(data)})
 	})
 	sess.SetOnStatusChangeCallback(func(status session.SessionStatus) {
 		a.emit("session:status", map[string]interface{}{
@@ -428,10 +425,7 @@ func (a *App) ContainerExecSession(connectionID, containerID, shell string) (*se
 	id := uuid.New().String()
 	sess := session.NewContainerExecSession(id, pty)
 	sess.SetOnDataCallback(func(data []byte) {
-		a.emit("session:data", map[string]interface{}{
-			"id":   sess.ID(),
-			"data": string(data),
-		})
+		a.emit("session:data", &sessionDataEvent{ID: sess.ID(), Data: string(data)})
 	})
 	sess.SetOnStatusChangeCallback(func(status session.SessionStatus) {
 		a.emit("session:status", map[string]interface{}{
@@ -465,16 +459,10 @@ func (a *App) createContainerFileSession(config session.ConnectionConfig) (*sess
 	// 与标准 CreateSession 尾部一致：接上数据/状态回调，前端的"已连接"
 	// 状态靠 session:status 事件驱动。
 	sess.SetOnDataCallback(func(data []byte) {
-		a.emit("session:data", map[string]interface{}{
-			"id":   sess.ID(),
-			"data": string(data),
-		})
+		a.emit("session:data", &sessionDataEvent{ID: sess.ID(), Data: string(data)})
 	})
 	sess.SetOnBinaryCallback(func(data []byte) {
-		a.emit("session:binary", map[string]interface{}{
-			"id":   sess.ID(),
-			"data": base64.StdEncoding.EncodeToString(data),
-		})
+		a.emit("session:binary", &sessionBinaryEvent{ID: sess.ID(), Data: base64.StdEncoding.EncodeToString(data)})
 	})
 	sess.SetOnStatusChangeCallback(func(status session.SessionStatus) {
 		a.emit("session:status", map[string]interface{}{

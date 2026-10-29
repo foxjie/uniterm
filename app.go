@@ -728,8 +728,11 @@ type connDelta struct {
 	All  *session.ConnectionStoreData `json:"all,omitempty"` // for replace (first emit)
 }
 
-// F-205: typed event shapes + pooled buffer so session:data emits
-// stop allocating a fresh map[string]interface{} per chunk.
+// F-205: typed event shapes for session:data / session:binary. Marshalling a
+// struct avoids the map allocation, interface boxing, and per-key reflection
+// of map[string]interface{}. Object pooling is deliberately NOT used: Wails
+// marshals event payloads asynchronously (the drain goroutine calls ToJSON
+// after Emit returns), so reusing a payload object is a data race.
 type sessionDataEvent struct {
 	ID   string `json:"id"`
 	Data string `json:"data"`
@@ -738,14 +741,6 @@ type sessionDataEvent struct {
 type sessionBinaryEvent struct {
 	ID   string `json:"id"`
 	Data string `json:"data"`
-}
-
-var sessionDataPool = stdsync.Pool{
-	New: func() any {
-		b := &bytes.Buffer{}
-		b.Grow(8 * 1024) // typical SSH chunk size, avoids re-grow on small inputs
-		return b
-	},
 }
 
 // computeConnDelta returns the set of upsert/remove deltas between
