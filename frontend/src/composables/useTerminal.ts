@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
-import { SessionResize } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { requestSessionResize } from '../services/sessionResizeOnce'
 import { queuedSessionWrite } from '../services/sessionWriter'
 import { writeClipboard } from './useClipboardWrite'
 import { useSettingsStore } from '../stores/settingsStore'
@@ -492,7 +492,7 @@ export function useTerminal(
       // Fallback to FitAddon if char dims aren't ready yet.
       fitAddon.fit()
       if (terminal.cols <= 0 || terminal.rows <= 0) return
-      SessionResize(sessionId, terminal.cols, terminal.rows).catch(() => {})
+      requestSessionResize(sessionId, terminal.cols, terminal.rows)
       return
     }
 
@@ -507,7 +507,7 @@ export function useTerminal(
 
     if (terminal.cols !== newCols || terminal.rows !== newRows) {
       terminal.resize(newCols, newRows)
-      SessionResize(sessionId, newCols, newRows).catch(() => {})
+      requestSessionResize(sessionId, newCols, newRows)
     }
   }
 
@@ -705,7 +705,9 @@ export function useTerminal(
         // Force send current terminal size to sync the backend PTY after reconnect.
         const sid = getSessionId()
         if (sid && terminal && terminal.cols > 0 && terminal.rows > 0) {
-          SessionResize(sid, terminal.cols, terminal.rows).catch(() => {})
+          // Force: reconnect reuses the session id but the backend channel
+          // is new and defaults to 80x24.
+          requestSessionResize(sid, terminal.cols, terminal.rows, true)
         }
         resize()
       } else if (payload.status === 'error') {

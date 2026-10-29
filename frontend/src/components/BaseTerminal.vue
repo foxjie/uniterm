@@ -139,7 +139,8 @@ import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, onActivated, on
 import type { Terminal } from '@xterm/xterm'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
-import { SessionResize, SessionEndZmodem } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { SessionEndZmodem } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { requestSessionResize } from '../services/sessionResizeOnce'
 import { queuedSessionWrite } from '../services/sessionWriter'
 import { WriteFileBase64, SaveFileDialog, FrontendLog, EnableSessionOutputLog, DisableSessionOutputLog, GetSessionOutputLogInfo, OpenPathInExplorer } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { useNativeFileDrop } from '../composables/useFilePanel'
@@ -803,7 +804,7 @@ function resize() {
     terminal.resize(terminal.cols, terminal.rows)
     // Full-viewport redraw — prevents canvas ghosting during rapid write bursts.
     terminal.refresh(0, terminal.rows - 1)
-    SessionResize(sid, terminal.cols, terminal.rows).catch(() => {})
+    requestSessionResize(sid, terminal.cols, terminal.rows)
   } else {
     getFitAddon()?.fit()
   }
@@ -1387,12 +1388,15 @@ onMounted(() => {
     // Force initial resize with retries — needed because cell dimensions
     // may not be available immediately, and for reused terminals the cols/rows
     // may hold stale dimensions from the previous container.
-    ;[50, 150, 300, 600, 1000, 2000].forEach(d => setTimeout(() => {
+      ;[50, 150, 300, 600, 1000, 2000].forEach(d => setTimeout(() => {
       if (!terminal) return
       getFitAddon()?.fit()
       const sessionId = props.sessionId
       if (sessionId && terminal.cols > 0 && terminal.rows > 0) {
-        SessionResize(sessionId, terminal.cols, terminal.rows).catch(() => {})
+        // Burst kept as-is for the registration race, but duplicates are
+        // collapsed: requestSessionResize re-sends only while no identical
+        // size has succeeded yet.
+        requestSessionResize(sessionId, terminal.cols, terminal.rows)
       }
     }, d))
   }
@@ -1797,7 +1801,7 @@ onMounted(() => {
         // Force send current terminal size to sync the backend PTY after reconnect.
         // The new session defaults to 80x24; without this, apps like vim/k9s use the wrong size.
         if (terminal && terminal.cols > 0 && terminal.rows > 0) {
-          SessionResize(props.sessionId, terminal.cols, terminal.rows).catch(() => {})
+          requestSessionResize(props.sessionId, terminal.cols, terminal.rows, true)
         }
         resize()
       } else if (payload.status === 'error') {
