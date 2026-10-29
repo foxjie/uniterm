@@ -109,6 +109,33 @@ describe('writeClipboard', () => {
     expect(ok).toBe(true)
     expect(mockClipboardSetText).toHaveBeenCalledWith('hello')
   })
+
+  // Clipboard managers and IME history tools briefly hold the clipboard on
+  // every change; both paths failing on the first pass must ride out the
+  // contention window with one delayed retry.
+  it('retries through a transient clipboard-ownership failure on Windows', async () => {
+    vi.useFakeTimers()
+    writeText.mockRejectedValue(new Error('clipboard busy'))
+    mockClipboardSetText
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+    const pending = writeClipboard('hello')
+    await vi.advanceTimersByTimeAsync(120)
+    const ok = await pending
+    expect(ok).toBe(true)
+    expect(mockClipboardSetText).toHaveBeenCalledTimes(2)
+  })
+
+  it('gives up and reports failure after the retry also fails', async () => {
+    vi.useFakeTimers()
+    writeText.mockRejectedValue(new Error('clipboard busy'))
+    mockClipboardSetText.mockResolvedValue(false)
+    const pending = writeClipboard('hello')
+    await vi.advanceTimersByTimeAsync(120)
+    const ok = await pending
+    expect(ok).toBe(false)
+    expect(mockClipboardSetText).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('readClipboardText', () => {

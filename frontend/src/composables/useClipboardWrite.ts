@@ -54,6 +54,8 @@ const wailsWriter: ClipboardWriter = async (text) => {
 const isApplePlatform = () => /Mac|iPhone|iPad|iPod/.test(navigator.userAgent)
 const isAndroidPlatform = () => /Android/.test(navigator.userAgent)
 
+const WRITE_RETRY_DELAY_MS = 120
+
 export const writeClipboard: ClipboardWriter = typeof Clipboard.SetText !== 'function'
   ? browserWriter // standalone path when Wails is absent (dev outside the runtime)
   : async (text) => {
@@ -63,7 +65,15 @@ export const writeClipboard: ClipboardWriter = typeof Clipboard.SetText !== 'fun
       // (what Wails reads, and what every other app sees) stays untouched, so a
       // browser-first copy lands nowhere. Verified in-device on an emulator.
       if (isApplePlatform() || isAndroidPlatform()) return wailsWriter(text)
-      return (await browserWriter(text)) || wailsWriter(text)
+      if (await browserWriter(text)) return true
+      if (await wailsWriter(text)) return true
+      // Same reasoning as the read retry below: a clipboard manager or IME
+      // history tool briefly holds the clipboard on every change, so a failed
+      // first attempt (OpenClipboard busy / browser write rejected) commonly
+      // succeeds a moment later. Without this retry selection-copies raced
+      // silently into the ground under such contention.
+      await new Promise(resolve => setTimeout(resolve, WRITE_RETRY_DELAY_MS))
+      return wailsWriter(text)
     }
 
 // Read with one delayed retry. An empty result can mean the clipboard was

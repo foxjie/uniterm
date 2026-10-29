@@ -323,6 +323,7 @@ let savedBaseY: number | null = null
 let unsubscribe: (() => void) | null = null
 let statusUnsubscribe: (() => void) | null = null
 let onDocumentMouseDown: ((e: MouseEvent) => void) | null = null
+let onSelectionMouseUp: ((e: MouseEvent) => void) | null = null
 let onTerminalAuxClick: ((e: MouseEvent) => void) | null = null
 let onOpenSearch: ((e: Event) => void) | null = null
 let onExport: ((e: Event) => void) | null = null
@@ -1620,10 +1621,40 @@ onMounted(() => {
       }
       if (text !== lastSelectionText) {
         lastSelectionText = text
-        writeClipboard(text)
+        writeClipboard(text).then(ok => {
+          if (!ok) {
+            // Record the failure (never the text) and unlock the guard so the
+            // mouseup fallback or a re-selection can retry the same text.
+            lastSelectionText = ''
+            FrontendLog('selectionCopy', `clipboard write failed for ${text.length} chars`)
+          }
+        })
       }
     }, 0)
   })
+
+  // Second chance on mouse release, mirroring the proven legacy copy path in
+  // useTerminal.ts: if the selection-change event or its write was lost under
+  // clipboard contention, the final selection still lands on the clipboard —
+  // Xshell-style "selection ends = copied", with no extra UI.
+  let mouseDownOnThisTerminal = false
+  const onTerminalMouseDownForCopy = () => { mouseDownOnThisTerminal = true }
+  terminal.element?.addEventListener('mousedown', onTerminalMouseDownForCopy)
+  onSelectionMouseUp = () => {
+    if (!mouseDownOnThisTerminal) return
+    mouseDownOnThisTerminal = false
+    if (settingsStore.settings.terminal.selectionAction !== 'copy') return
+    const text = terminal?.getSelection()
+    if (!text || text === lastSelectionText) return
+    lastSelectionText = text
+    writeClipboard(text).then(ok => {
+      if (!ok) {
+        lastSelectionText = ''
+        FrontendLog('selectionCopy', `mouseup clipboard write failed for ${text.length} chars`)
+      }
+    })
+  }
+  document.addEventListener('mouseup', onSelectionMouseUp)
 
   // Close suggestion popup when clicking outside
   onDocumentMouseDown = (event: MouseEvent) => {
@@ -2303,6 +2334,10 @@ onUnmounted(() => {
   if (onDocumentMouseDown) {
     document.removeEventListener('mousedown', onDocumentMouseDown)
     onDocumentMouseDown = null
+  }
+  if (onSelectionMouseUp) {
+    document.removeEventListener('mouseup', onSelectionMouseUp)
+    onSelectionMouseUp = null
   }
   if (onTerminalAuxClick) {
     document.removeEventListener('auxclick', onTerminalAuxClick)
