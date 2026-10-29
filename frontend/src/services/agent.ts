@@ -1,7 +1,7 @@
-import { chat, AVAILABLE_TOOLS, ChatCancelledError, ChatTimeoutError, captureChatConfiguration } from './llm'
-import { prepareAgentContext } from './contextCompaction'
+import { chat, AVAILABLE_TOOLS, ChatCancelledError, ChatTimeoutError } from './llm'
 import { executeCommand, startCommand, captureTerminal, collectOutput, sendTerminalKey } from './terminalAgent'
 import type { ExecuteResult } from './terminalAgent'
+import { assessLocalRisk } from './localRisk'
 import { useAIStore } from '../stores/aiStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useTabStore } from '../stores/tabStore'
@@ -82,11 +82,35 @@ type RiskLevel = 'read' | 'write' | 'dangerous'
 
 export const VALID_RISK: readonly RiskLevel[] = ['read', 'write', 'dangerous']
 
+// 风险等级排序：read < write < dangerous，用于取 max(modelRisk, localRisk)。
+const RISK_RANK: Record<RiskLevel, number> = { read: 0, write: 1, dangerous: 2 }
+
+/**
+ * 计算工具调用的风险等级。
+ *
+ * 纵深防御：同时考虑模型自声明的 `input.risk`（不可信——prompt injection
+ * 可将其篡改为 "read" 以绕过确认）和本地模式匹配 assessLocalRisk（独立于
+ * 模型声明），取两者中更严格的一方。这样即使模型把 `rm -rf ~` 声明为
+ * risk:"read"，localRisk 仍会返回 "dangerous"，最终按 dangerous 处理。
+ *
+ * 非 execute_command / start_command 工具一律 dangerous（default-closed）。
+ */
 export function getRisk(tu: { name: string; input: Record<string, unknown> }): RiskLevel {
   if (tu.name !== 'execute_command' && tu.name !== 'start_command') return 'dangerous'
-  const risk = tu.input.risk
-  if (risk === 'read' || risk === 'write' || risk === 'dangerous') return risk
-  return 'dangerous' // default-closed: unknown / missing / wrong-typed → dangerous
+
+  // 模型声明的风险（不可信）
+  const declared = tu.input.risk
+  const modelRisk: RiskLevel =
+    declared === 'read' || declared === 'write' || declared === 'dangerous'
+      ? declared
+      : 'dangerous' // default-closed: unknown / missing / wrong-typed → dangerous
+
+  // 本地模式匹配风险（独立于模型声明，纯静态分析）
+  const command = typeof tu.input.command === 'string' ? tu.input.command : ''
+  const localRisk = assessLocalRisk(command) as RiskLevel
+
+  // 取两者最高：任一来源判定为 dangerous 则 dangerous，任一判定为 write 则至少 write
+  return RISK_RANK[localRisk] > RISK_RANK[modelRisk] ? localRisk : modelRisk
 }
 
 function shouldConfirm(risk: RiskLevel): boolean {
@@ -106,21 +130,9 @@ function shouldConfirm(risk: RiskLevel): boolean {
 // On any failure we throw InputValidationError so the dispatch site can
 // surface the error back to the model and continue the agent loop.
 
-function positiveMilliseconds(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
-}
-
-function nonNegativeLines(value: unknown, fallback: number, name: string): number {
-  if (value === undefined || value === null) return fallback
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new InputValidationError(`${name} must be a non-negative integer`)
-  }
-  return value
-}
-
 interface ExecuteCommandInput {
   command: string
-  timeout_ms: number
+  timeout: number
   head_lines: number
   tail_lines: number
   panel?: string
@@ -130,9 +142,9 @@ function validateExecuteCommandInput(raw: unknown): ExecuteCommandInput {
   const obj = validateObject(raw, 'execute_command input')
   return {
     command: validateRequiredString(obj.command, 'command'),
-    timeout_ms: positiveMilliseconds(obj.timeout_ms, 60000),
-    head_lines: nonNegativeLines(obj.head_lines, 50, 'head_lines'),
-    tail_lines: nonNegativeLines(obj.tail_lines, 300, 'tail_lines'),
+    timeout: typeof obj.timeout === 'number' && Number.isFinite(obj.timeout) && obj.timeout > 0 ? obj.timeout : 60,
+    head_lines: typeof obj.head_lines === 'number' && Number.isFinite(obj.head_lines) ? obj.head_lines : 50,
+    tail_lines: typeof obj.tail_lines === 'number' && Number.isFinite(obj.tail_lines) ? obj.tail_lines : 300,
     panel: typeof obj.panel === 'string' ? obj.panel : undefined,
   }
 }
@@ -260,10 +272,9 @@ function capToolResult(text: string): string {
 }
 
 function formatExecuteResult(result: ExecuteResult): string {
-  if (result.completed ?? (!result.cancelled && !result.timedOut && result.exitCode >= 0)) {
+  if (!result.timedOut) {
     return `${result.output}\n\n[COMMAND COMPLETED]`
   }
-  if (!result.timedOut) return `${result.output}\n\n[COMMAND COMPLETION UNCONFIRMED]`
   // Put the timeout guidance right after the status line so the AI sees the
   // verdict before reading the follow-up advice.
   return `${result.output}\n\n[COMMAND TIMED OUT]\n\n`
@@ -434,9 +445,6 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
     return
   }
 
-  // A menu change applies to the next run, never halfway through a tool loop.
-  const configuration = captureChatConfiguration()
-
   // Auto-reject any pending command/question from previous turn
   if (userInput && store.pendingCommand) {
     store.addMessage({
@@ -460,8 +468,6 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
   store.resetStop()
   store.isRunning = true
   store.status = 'thinking'
-  store.contextNotice = ''
-  store.contextStats = null
   store.thinkingText = ''
   store.thinkingStartedAt = 0
 
@@ -530,7 +536,6 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
       store.status = 'outputting'
     }
   })
-  const runGeneration = activeGeneration
 
   // Reasoning/thinking deltas (ai:thinking). Streamed into the store's live
   // buffer (clickable "Thinking..." box) and appended to the current assistant
@@ -564,7 +569,7 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
   function cleanupStreamListeners() {
     cleanupTokenListener()
     unsubThinking?.()
-    if (runGeneration === activeGeneration) setActiveAssistantMsg(null)
+    setActiveAssistantMsg(null)
   }
 
   // External MCP client tools: fetched once per run and merged into the tool
@@ -573,14 +578,9 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
   const mergedTools = [...AVAILABLE_TOOLS, ...remoteTools.map(toAgentToolEntry)]
 
   let turnCount = 0
-  let compactionFailed = false
   const maxTurns = useSettingsStore().settings.ai.maxTurns ?? 20
 
   while (maxTurns === 0 || turnCount < maxTurns) {
-    if (runGeneration !== activeGeneration) {
-      cleanupStreamListeners()
-      return
-    }
     turnCount++
 
     if (store.stopRequested) {
@@ -630,9 +630,8 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
     const toolUses: Array<{ id: string; name: string; input: Record<string, unknown> }> = []
 
     const chatOptions: any = {
-      configuration,
       system: buildSystemPrompt(),
-      messages: [],
+      messages: store.conversation,
       tools: mergedTools,
       onChunk: (chunk: string) => {
         if (store.stopRequested) return
@@ -646,10 +645,6 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
     }
     try {
       store.status = 'thinking'
-      const prepared = await prepareAgentContext(chatOptions.system, mergedTools, compactionFailed, () => runGeneration === activeGeneration, configuration?.model)
-      compactionFailed ||= prepared.failed
-      if (store.stopRequested || runGeneration !== activeGeneration) throw new ChatCancelledError()
-      chatOptions.messages = prepared.messages
       await chat(chatOptions)
       // Preserve raw API message blocks for conversation history
       if (chatOptions._rawApiMsg) {
@@ -668,10 +663,6 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
       // Save immediately so the complete assistant content and raw API message are persisted
       store.doSave()
     } catch (e: any) {
-      if (runGeneration !== activeGeneration) {
-        cleanupStreamListeners()
-        return
-      }
       const errMsg = e.message ?? String(e)
       // Convert the failed assistant placeholder to a display-only tool message.
       // This keeps the error visible in the UI without polluting the API conversation.
@@ -686,9 +677,6 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
       delete assistantMsg._rawApiMsg
       delete assistantMsg.tool_calls
       store.setDebugInfo(store.conversation, errMsg)
-      // The placeholder was saved before the request. Persist the failure
-      // immediately too, otherwise the last failed turn stays blank on disk.
-      store.doSave()
       store.isRunning = false
       cleanupStreamListeners()
       return
@@ -785,7 +773,7 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
       const command = validated.command
       // Honor the model-provided timeout as-is (no clamping); the validator
       // falls back to 60s when the argument is missing or invalid.
-      const timeoutMs = validated.timeout_ms
+      const timeoutMs = validated.timeout * 1000
       const headLines = validated.head_lines
       const tailLines = validated.tail_lines
       const risk = getRisk(tu)
@@ -899,11 +887,11 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
         })
       }
     } else if (tu.name === 'capture_terminal') {
+      const tailLines = (tu.input.tail_lines as number) ?? 200
       try {
-        const tailLines = nonNegativeLines(tu.input.tail_lines, 200, 'tail_lines')
         store.status = 'executing'
         const panelTitle = tu.input.panel as string | undefined
-        const result = await captureTerminal(tailLines, panelTitle)
+        const result = captureTerminal(tailLines, panelTitle)
         store.addMessage({
           id: `msg-${Date.now()}`,
           role: 'tool',
@@ -919,10 +907,12 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
         })
       }
     } else if (tu.name === 'collect_output') {
-      const timeoutMs = positiveMilliseconds(tu.input.timeout_ms, 30000)
+      // Honor the model-provided timeout as-is (no clamping); `|| 30` falls
+      // back to 30s when the argument is missing or invalid.
+      const timeoutMs = ((tu.input.timeout as number) || 30) * 1000
+      const headLines = (tu.input.head_lines as number) ?? 100
+      const tailLines = (tu.input.tail_lines as number) ?? 300
       try {
-        const headLines = nonNegativeLines(tu.input.head_lines, 100, 'head_lines')
-        const tailLines = nonNegativeLines(tu.input.tail_lines, 300, 'tail_lines')
         store.status = 'executing'
         const panelTitle = tu.input.panel as string | undefined
         const result = await collectOutput(timeoutMs, headLines, tailLines, () => store.stopRequested, panelTitle)
@@ -936,7 +926,7 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
           cleanupStreamListeners()
           return
         }
-        const status = result.completed ? '[COMMAND COMPLETED]' : '[COMMAND COMPLETION UNCONFIRMED]'
+        const status = result.completed ? '[COMMAND COMPLETED]' : '[COMMAND STILL RUNNING]'
         store.addMessage({
           id: `msg-${Date.now()}`,
           role: 'tool',
@@ -1086,8 +1076,8 @@ export async function runAgent(userInput: string, skillName?: string, skillBody?
         store.addSkillCard(name, 'auto')
         const manifest = [
           body,
-          files.references.length ? `\n\nREFERENCES:\n${files.references.map(f => `- ${f}`).join('\n')}` : '',
-          files.scripts.length ? `\n\nSCRIPTS:\n${files.scripts.map(f => `- ${f}`).join('\n')}` : '',
+          files.references.length ? `\n\nREFERENCES:\n${files.references.map((f: string) => `- ${f}`).join('\n')}` : '',
+          files.scripts.length ? `\n\nSCRIPTS:\n${files.scripts.map((f: string) => `- ${f}`).join('\n')}` : '',
         ].join('')
         store.addMessage({
           id: `msg-${Date.now()}`,

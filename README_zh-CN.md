@@ -336,6 +336,7 @@ uniTerm/
     <td align="center"><a href="https://github.com/lutzr400">@lutzr400</a></td>
     <td align="center"><a href="https://github.com/Merrcurys">@Merrcurys</a></td>
     <td align="center"><a href="https://github.com/etanman">@etanman</a></td>
+    <td align="center"><a href="https://github.com/wuqiang57">@wuqiang57</a></td>
   </tr>
 </table>
 
