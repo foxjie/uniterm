@@ -24,6 +24,9 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   // 且不要求 flag 串结尾（去掉 \b），用 \s 确保 flag 后是空白即命令参数边界。
   /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s/,
   /\brm\s+-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s/,
+  // rm -r -f / rm -f -r（分开写 flag，组合形式上面已覆盖，这里补漏）
+  /\brm\s+-r\s+-f\b/,
+  /\brm\s+-f\s+-r\b/,
   // rm --recursive --force（长选项形式）
   /\brm\s+[^&|;]*--recursive[^&|;]*--force/,
   /\brm\s+[^&|;]*--force[^&|;]*--recursive/,
@@ -63,8 +66,8 @@ const WRITE_PATTERNS: RegExp[] = [
   /\bchown\b/,
   /\bmkdir\b/,
   /\btouch\b/,
-  // 输出重定向 > / >>（写文件）
-  />>?/,
+  // 输出重定向 > / >>（写文件）由 hasRedirectWrite() 专门检测引号外的重定向，
+  // 不在此用裸 />>?/ 匹配，避免 echo "a > b" 引号内的 > 被误判为 write。
   // 包管理器安装
   /\bapt(?:-get)?\s+install\b/,
   /\baptitude\s+install\b/,
@@ -117,18 +120,29 @@ const BYPASS_PATTERNS: RegExp[] = [
 ]
 
 /**
+ * 将单/双引号内的内容替换为占位符 _STR_，使后续模式匹配只针对引号外
+ * 的真实 shell 语法，不会把 `echo "rm -rf /"` 或 `echo "a > b"` 引号内
+ * 的文本误判为危险/写命令。
+ *
+ * 注意：反引号不在此处理（它是命令替换，属 BYPASS_PATTERNS 管辖）。
+ * 嵌套引号处理为尽力而为：先替换单引号再替换双引号。
+ */
+function stripQuotes(s: string): string {
+  return s.replace(/'[^']*'/g, '_STR_').replace(/"[^"]*"/g, '_STR_')
+}
+
+/**
  * 剥离 shell 语法噪音，收窄误报。
  *
- * 将变量引用 $VAR / ${VAR} 替换为占位符 _VAR_，并将重定向目标
- * （> file、>> file、2> file、&> file 等，但保留 > /dev/xxx）移除，
- * 使后续危险模式匹配只针对实际命令部分，不会把 $HOME 或 > output.txt
- * 误判为危险命令。
+ * 依次：引号内容 → 占位符、${VAR}/$VAR → 占位符、重定向目标文件名 → 移除，
+ * 使后续危险/写模式匹配只针对实际命令部分，不会把 $HOME、> output.txt
+ * 或引号内的文本误判为危险命令。
  *
  * 注意：$() 命令替换和反引号 **不** 被剥离——它们是真正的命令替换，
  * 属于 BYPASS_PATTERNS 的检测范畴，需在原始命令上匹配。
  */
 function stripShellNoise(command: string): string {
-  let s = command
+  let s = stripQuotes(command)
   // 1. ${VAR} → _VAR_（花括号变量引用）
   s = s.replace(/\$\{[a-zA-Z_]\w*\}/g, '_VAR_')
   // 2. $VAR → _VAR_（裸变量引用，排除 $( 命令替换）
@@ -138,6 +152,16 @@ function stripShellNoise(command: string): string {
   //    但不匹配 > /dev/xxx（块设备重定向属 DANGEROUS_PATTERNS 管辖）
   s = s.replace(/(?:&|\d+)?>>?\s*(?!\/dev\/)\S+/g, '')
   return s
+}
+
+/**
+ * 检测引号外的重定向操作符（> / >>），即写文件操作。
+ *
+ * 先剥离引号内容再匹配 >>? ，这样 `echo "a > b"` 中引号内的 > 不会
+ * 被误判为写操作，而 `echo hi > /tmp/x` 中引号外的 > 仍能命中。
+ */
+function hasRedirectWrite(command: string): boolean {
+  return />>?/.test(stripQuotes(command))
 }
 
 /**
@@ -162,9 +186,9 @@ export function assessLocalRisk(command: string): LocalRiskLevel {
     if (re.test(command)) return 'dangerous'
   }
 
-  // 剥离 $VAR / ${VAR} / 重定向目标，收窄误报。
-  // 危险模式只对剥离后的命令部分匹配，避免 $HOME 或 > output.txt
-  // 等 shell 语法噪音被误判为危险命令。
+  // 剥离引号内容 / $VAR / ${VAR} / 重定向目标，收窄误报。
+  // 危险与写模式都对剥离后的命令部分匹配，避免引号内的 "rm -rf /" 或
+  // $HOME、> output.txt 等 shell 语法噪音被误判。
   const stripped = stripShellNoise(command)
 
   let isDangerous = false
@@ -175,14 +199,17 @@ export function assessLocalRisk(command: string): LocalRiskLevel {
     }
   }
 
-  // 写操作对原始命令匹配：重定向 > file 确实是写操作，不应被剥离。
+  // 写操作对剥离后的命令匹配：引号内的 rm/mv 等不会误命中。
   let isWrite = false
   for (const re of WRITE_PATTERNS) {
-    if (re.test(command)) {
+    if (re.test(stripped)) {
       isWrite = true
       break
     }
   }
+  // 引号外的重定向操作符（> / >>）是写文件操作，单独检测以避免
+  // 引号内的 > 误报（stripShellNoise 会移除重定向目标，故在此用原始命令）。
+  if (!isWrite && hasRedirectWrite(command)) isWrite = true
 
   if (isDangerous) return 'dangerous'
   if (isWrite) return 'write'

@@ -210,3 +210,44 @@ describe('assessLocalRisk - 复合命令取最严格', () => {
     expect(assessLocalRisk('sudo ls -la')).toBe('read')
   })
 })
+describe('assessLocalRisk - 引号内模式不误报 (false positive 收窄)', () => {
+  it('引号内的 > 不被判为重定向写', () => {
+    expect(assessLocalRisk('echo "a > b"')).toBe('read')
+    expect(assessLocalRisk('echo "1 >> 2"')).toBe('read')
+    expect(assessLocalRisk('grep ">" file')).toBe('read')
+  })
+
+  it('引号内的 rm -rf 不被判为危险', () => {
+    expect(assessLocalRisk('echo "rm -rf /"')).toBe('read')
+    expect(assessLocalRisk('echo "run: rm -rf ~"')).toBe('read')
+    expect(assessLocalRisk('echo "mkfs.ext4 /dev/sda"')).toBe('read')
+  })
+
+  it('单引号内的危险命令同样不误报', () => {
+    expect(assessLocalRisk("echo 'rm -rf /tmp/x'")).toBe('read')
+    expect(assessLocalRisk("echo 'a > b'")).toBe('read')
+  })
+
+  it('引号外的重定向仍为 write', () => {
+    expect(assessLocalRisk('echo hi > /tmp/x')).toBe('write')
+    expect(assessLocalRisk('echo hi >> /tmp/x')).toBe('write')
+    expect(assessLocalRisk('cat foo > /tmp/out')).toBe('write')
+  })
+
+  it('混合引号内外重定向：引号外有 > 则 write', () => {
+    expect(assessLocalRisk('echo "a > b" > /tmp/x')).toBe('write')
+  })
+})
+
+describe('assessLocalRisk - 分开 flag 漏报修复 (false negative)', () => {
+  it('rm -r -f / rm -f -r 分开写 flag 仍为 dangerous', () => {
+    expect(assessLocalRisk('rm -r -f /tmp/x')).toBe('dangerous')
+    expect(assessLocalRisk('rm -f -r /tmp/x')).toBe('dangerous')
+    expect(assessLocalRisk('sudo rm -r -f /tmp/x')).toBe('dangerous')
+  })
+
+  it('rm --recursive --force 长选项仍为 dangerous', () => {
+    expect(assessLocalRisk('rm --recursive --force /tmp/x')).toBe('dangerous')
+    expect(assessLocalRisk('rm --force --recursive /tmp/x')).toBe('dangerous')
+  })
+})
