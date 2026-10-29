@@ -1,74 +1,94 @@
-// S2: AI Agent 本地危险命令防线
+// Local danger guard for AI agent shell commands.
 //
-// assessLocalRisk 对一条 shell 命令做纯模式匹配，独立于 LLM 自声明的
-// `input.risk` 字段。agent.ts 的 getRisk 会取 max(modelRisk, localRisk)，
-// 这样即使被 prompt injection 劫持的模型把 `rm -rf ~` 声明为 risk:"read"
-// 也无法绕过用户确认。
+// assessLocalRisk does pure pattern matching on a shell command, independent
+// of the LLM-declared `input.risk` field. agent.ts getRisk() takes
+// max(modelRisk, localRisk), so a prompt-injected model declaring
+// `rm -rf ~` as risk:"read" still cannot bypass user confirmation.
 //
-// 这是"纵深防御"而非绝对防线：base64/变量拼接等绕过检测不可能穷尽，
-// 只能覆盖常见模式。文档中需说明这一点。
+// This is defense in depth, not an absolute wall: obfuscation vectors such as
+// base64 payloads or variable indirection cannot be fully enumerated, so only
+// common patterns are covered. Unmatched commands fall through to 'read' —
+// the model-declared risk remains the primary confirmation gate; this layer
+// only ever escalates.
 //
-// 评级语义：
-//   - 'read'      只读、无副作用（默认）
-//   - 'write'     修改/创建数据，但不系统级破坏
-//   - 'dangerous' 潜在破坏性或系统级影响
+// Risk semantics:
+//   - 'read'      read-only, no side effects (default)
+//   - 'write'     mutates/creates data, but no system-level damage
+//   - 'dangerous' potentially destructive or system-level impact
 
 export type LocalRiskLevel = 'read' | 'write' | 'dangerous'
 
-// ---- 危险模式黑名单（强制 dangerous） ----
-// 用正则做大小写不敏感匹配；命令前可能有空白、变量赋值、sudo/doas 前缀，
-// 所以一律用 \b 边界 + 任意前缀通配。
+// Matches the given word only at command position: start of the command, or
+// right after a separator (; & | ( ), optionally preceded by env-var
+// assignments or sudo/doas prefixes. Prevents arguments such as
+// `grep reboot /var/log/syslog` from triggering a pattern.
+function atCommandPosition(word: string): RegExp {
+  return new RegExp(
+    `(?:^|[;&|(]\\s*)(?:[a-zA-Z_]\\w*=\\S*\\s+)*(?:sudo\\s+|doas\\s+)?${word}\\b`,
+  )
+}
+
+// ---- Dangerous patterns (force 'dangerous') ----
 const DANGEROUS_PATTERNS: RegExp[] = [
-  // rm -rf / rm -fr（任意路径，含 ~、*、$HOME）。
-  // flag 可能与其他短选项组合（-rfv / -frv），所以 r 与 f 之间允许任意字母，
-  // 且不要求 flag 串结尾（去掉 \b），用 \s 确保 flag 后是空白即命令参数边界。
-  /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s/,
-  /\brm\s+-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s/,
-  // rm -r -f / rm -f -r（分开写 flag，组合形式上面已覆盖，这里补漏）
-  /\brm\s+-r\s+-f\b/,
-  /\brm\s+-f\s+-r\b/,
-  // rm --recursive --force（长选项形式）
-  /\brm\s+[^&|;]*--recursive[^&|;]*--force/,
-  /\brm\s+[^&|;]*--force[^&|;]*--recursive/,
-  // mkfs 系列（mkfs.ext4 / mkfs.vfat / mkswap）
-  /\bmkfs\b/,
-  /\bmkswap\b/,
-  // dd 写块设备：dd if=...of=/dev/... 或 dd of=/dev/...
-  /\bdd\b[^|;&]*\bof=\/dev\//,
-  // chmod -R 777 / 或 chmod 777 /（系统级权限破坏）
-  /\bchmod\s+(-R\s+)?777\s+\/(?:\s|$|;|&|\|)/,
-  // chmod -R 000 /（剥夺所有权限）
-  /\bchmod\s+-R\s+000\s+\/(?:\s|$|;|&|\|)/,
-  // curl/wget 管道到 shell（远程脚本执行）
+  // mkfs family (mkfs.ext4 / mkfs.vfat / mkswap)
+  atCommandPosition('mkfs'),
+  atCommandPosition('mkswap'),
+  // dd writing to a block device: dd if=... of=/dev/...
+  atCommandPosition('dd\\b[^|;&]*\\bof=/dev/'),
+  // chmod -R 777|000 on any absolute path (system-wide permission damage)
+  /(?:^|[;&|(]\s*)(?:[a-zA-Z_]\w*=\S*\s+)*(?:sudo\s+|doas\s+)?chmod\s+(?:-R\s+)?(?:777|000)\s+\//,
+  // curl/wget piped into a shell (remote script execution)
   /\b(curl|wget)\b[^|;&]*\|\s*(sh|bash|zsh|fish|python|python3|perl|ruby)\b/,
   // fork bomb :(){ :|:& };:
   /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
-  // 直接重定向到块设备 > /dev/sda
+  // direct redirection onto a block device: > /dev/sda
   />\s*\/dev\/(?:sd|nvme|hd|vd|disk)/,
-  // shutdown / reboot / halt / poweroff
-  /\b(shutdown|reboot|halt|poweroff)\b/,
-  // kill -9 1（杀 init）
-  /\bkill\s+-9\s+1\b/,
-  /\bkill\s+-KILL\s+1\b/,
-  // killall / pkill -9（批量强杀）
-  /\bkillall\b/,
-  /\bpkill\s+-9\b/,
-  /\bpkill\s+-KILL\b/,
+  // shutdown / reboot / halt / poweroff at command position
+  atCommandPosition('(?:shutdown|reboot|halt|poweroff)'),
+  // kill -9 / kill -KILL with any pid (strong signal to an arbitrary process)
+  atCommandPosition('kill\\s+(?:-9|-KILL)'),
+  // killall / pkill (batch kill by name, any signal)
+  atCommandPosition('killall'),
+  atCommandPosition('pkill'),
 ]
 
-// ---- 写操作模式（write） ----
-// 命中即 write；若同时命中 DANGEROUS 则取 dangerous（在 assessLocalRisk 里合并）。
+// Detects `rm` combined with both recursive and force flags in any
+// arrangement within one command segment: `rm -rf /x`, `rm -r -f /x`,
+// `rm -frv /x`, `rm /x -rf`, `rm --recursive --force /x`.
+// Segmenting on ; & | keeps flags from leaking across compound commands.
+function isForceRecursiveRm(stripped: string): boolean {
+  for (const segment of stripped.split(/[;&|]/)) {
+    if (!/\brm\b/.test(segment)) continue
+    // Only flag tokens (preceded by whitespace) count, so file names like
+    // `rm notes-run-final` are not misread as flags. The matched tokens keep
+    // their leading whitespace, so trim it before testing.
+    const flags = (segment.match(/(?:^|\s)-{1,2}[a-zA-Z][\w-]*/g) ?? []).map((f) =>
+      f.trimStart(),
+    )
+    const hasRecursive = flags.some(
+      (f) => f === '--recursive' || /^-[a-zA-Z]*r/.test(f),
+    )
+    const hasForce = flags.some((f) => f === '--force' || /^-[a-zA-Z]*f/.test(f))
+    if (hasRecursive && hasForce) return true
+  }
+  return false
+}
+
+// ---- Write patterns ('write') ----
+// A hit means at least 'write'; DANGEROUS still wins when both match
+// (merged in assessLocalRisk).
 const WRITE_PATTERNS: RegExp[] = [
-  // 文件系统修改：rm（非 -rf，-rf 已被危险匹配）、mv、chmod、chown、mkdir、touch
+  // Filesystem mutation: rm (non -rf, caught above), mv, chmod, chown,
+  // mkdir, touch
   /\brm\b/,
   /\bmv\b/,
   /\bchmod\b/,
   /\bchown\b/,
   /\bmkdir\b/,
   /\btouch\b/,
-  // 输出重定向 > / >>（写文件）由 hasRedirectWrite() 专门检测引号外的重定向，
-  // 不在此用裸 />>?/ 匹配，避免 echo "a > b" 引号内的 > 被误判为 write。
-  // 包管理器安装
+  // Output redirection > / >> (writes a file)
+  />>?/,
+  // Package manager installs
   /\bapt(?:-get)?\s+install\b/,
   /\baptitude\s+install\b/,
   /\byum\s+install\b/,
@@ -79,7 +99,7 @@ const WRITE_PATTERNS: RegExp[] = [
   /\bnpm\s+install\b/,
   /\bnpx\s+install\b/,
   /\byarn\s+add\b/,
-  // docker 容器/镜像销毁
+  // docker container/image destruction
   /\bdocker\s+rm\b/,
   /\bdocker\s+rmi\b/,
   /\bdocker\s+stop\b/,
@@ -90,126 +110,134 @@ const WRITE_PATTERNS: RegExp[] = [
   // systemctl stop/disable
   /\bsystemctl\s+stop\b/,
   /\bsystemctl\s+disable\b/,
-  // iptables -F（清空防火墙规则）
+  // iptables -F (flush firewall rules)
   /\biptables\s+-F\b/,
   /\biptables\s+--flush\b/,
-  // 用户管理
+  // User management
   /\buserdel\b/,
   /\busermod\b/,
   /\bgroupdel\b/,
+  // Sending a signal to a process (plain kill; kill -9/-KILL/killall/pkill
+  // are already 'dangerous')
+  /\bkill\b/,
 ]
 
-// ---- 反绕过检测（一律 dangerous） ----
-// 这些模式试图隐藏真实命令，无法静态展开，统一按危险处理。
+// ---- Anti-bypass patterns (always 'dangerous') ----
+// These try to hide the real command and cannot be statically expanded,
+// so they are uniformly treated as dangerous.
 const BYPASS_PATTERNS: RegExp[] = [
-  // base64 解码后管道执行：echo ...|base64 -d|sh
+  // base64 decode piped into a shell: echo ... | base64 -d | sh
   /\bbase64\b[^|;&]*\|\s*(sh|bash|zsh|fish|python|python3|perl|ruby)\b/,
-  // sh -c / bash -c / zsh -c 内层命令
+  // sh -c / bash -c / zsh -c inner command
   /\b(sh|bash|zsh|fish)\s+-c\b/,
-  // eval 内层命令
+  // eval inner command
   /\beval\b/,
-  // $() 命令替换
-  /\$\(/,
-  // 反引号命令替换
-  /`/,
-  // 变量拼接执行：VAR="cmd"; $VAR ... — 将命令赋值给变量后通过 $VAR 执行，
-  // 无法静态判断 $VAR 展开内容，一律按危险处理。
-  // 仅匹配"赋值 + 分隔符 + $VAR 在命令首位"的精确模式，不会误伤
-  // echo $HOME / ls $PATH 等正常变量引用（那些 $VAR 不在命令首位）。
+  // Variable indirection: VAR="cmd"; $VAR ... — the command is assigned to
+  // a variable and executed via $VAR, so its expansion cannot be judged
+  // statically. Only matches the precise "assignment + separator + $VAR at
+  // command position" shape; ordinary references like `echo $HOME` or
+  // `ls $PATH` (where $VAR is not at command position) are not affected.
   /\b\w+\s*=\s*["'][^"']*["']\s*[;&|]+\s*\$\w+/,
 ]
 
 /**
- * 将单/双引号内的内容替换为占位符 _STR_，使后续模式匹配只针对引号外
- * 的真实 shell 语法，不会把 `echo "rm -rf /"` 或 `echo "a > b"` 引号内
- * 的文本误判为危险/写命令。
+ * Removes shell syntax noise to narrow false positives.
  *
- * 注意：反引号不在此处理（它是命令替换，属 BYPASS_PATTERNS 管辖）。
- * 嵌套引号处理为尽力而为：先替换单引号再替换双引号。
- */
-function stripQuotes(s: string): string {
-  return s.replace(/'[^']*'/g, '_STR_').replace(/"[^"]*"/g, '_STR_')
-}
-
-/**
- * 剥离 shell 语法噪音，收窄误报。
+ * Replaces variable references $VAR / ${VAR} with the placeholder _VAR_, and
+ * removes redirection targets (> file, >> file, 2> file, &> file, ... but
+ * keeps > /dev/xxx) so later dangerous-pattern matching only sees the actual
+ * command parts, and $HOME or > output.txt are not misjudged as dangerous.
  *
- * 依次：引号内容 → 占位符、${VAR}/$VAR → 占位符、重定向目标文件名 → 移除，
- * 使后续危险/写模式匹配只针对实际命令部分，不会把 $HOME、> output.txt
- * 或引号内的文本误判为危险命令。
- *
- * 注意：$() 命令替换和反引号 **不** 被剥离——它们是真正的命令替换，
- * 属于 BYPASS_PATTERNS 的检测范畴，需在原始命令上匹配。
+ * The target portion deliberately stops at ; & | so a token following a
+ * command separator is preserved for matching: `echo a>file;rm -rf /x`
+ * keeps `rm -rf /x` visible.
  */
 function stripShellNoise(command: string): string {
-  let s = stripQuotes(command)
-  // 1. ${VAR} → _VAR_（花括号变量引用）
+  let s = command
+  // 1. ${VAR} → _VAR_ (braced variable reference)
   s = s.replace(/\$\{[a-zA-Z_]\w*\}/g, '_VAR_')
-  // 2. $VAR → _VAR_（裸变量引用，排除 $( 命令替换）
+  // 2. $VAR → _VAR_ (bare variable reference, excluding $( command substitution)
   s = s.replace(/\$(?!\()[a-zA-Z_]\w*/g, '_VAR_')
-  // 3. 移除重定向目标文件名（保留到 /dev/ 的重定向，那是危险操作）
-  //    匹配 > file、>> file、2> file、2>> file、&> file、&>> file
-  //    但不匹配 > /dev/xxx（块设备重定向属 DANGEROUS_PATTERNS 管辖）
-  s = s.replace(/(?:&|\d+)?>>?\s*(?!\/dev\/)\S+/g, '')
+  // 3. Remove redirection target file names (keep redirections onto /dev/,
+  //    those are a dangerous operation)
+  //    Matches > file, >> file, 2> file, 2>> file, &> file, &>> file
+  //    but not > /dev/xxx (block-device redirection is DANGEROUS_PATTERNS' job)
+  s = s.replace(/(?:&|\d+)?>>?\s*(?!\/dev\/)[^\s;&|]+/g, '')
   return s
 }
 
 /**
- * 检测引号外的重定向操作符（> / >>），即写文件操作。
- *
- * 先剥离引号内容再匹配 >>? ，这样 `echo "a > b"` 中引号内的 > 不会
- * 被误判为写操作，而 `echo hi > /tmp/x` 中引号外的 > 仍能命中。
+ * Removes the contents of single/double-quoted strings so characters like
+ * `>` inside quotes (e.g. `grep 'a>b' file`) are not mistaken for shell
+ * syntax. The quotes themselves are kept as empty delimiters.
  */
-function hasRedirectWrite(command: string): boolean {
-  return />>?/.test(stripQuotes(command))
+function stripQuoted(command: string): string {
+  return command
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
 }
 
 /**
- * 评估单条命令的本地风险等级。
+ * Assesses the local risk level of a single command.
  *
- * 不依赖模型声明，纯模式匹配。命令可能是复合命令（&&、||、;、|），
- * 对整条字符串做正则扫描即可：任何子命令命中危险模式则整条危险，
- * 任何子命令命中写模式则整条至少 write。
+ * Pure pattern matching, independent of the model's declaration. The command
+ * may be compound (&&, ||, ;, |); a regex sweep over the whole string means
+ * any sub-command hitting a dangerous pattern makes the whole command
+ * dangerous, and any sub-command hitting a write pattern makes it at least
+ * write.
  *
- * 反绕过模式（base64/sh -c/eval/$()/变量拼接）一律按 dangerous 处理，
- * 因为无法静态判断内层命令的真实意图。
+ * Command substitution ($() / backticks) cannot be expanded statically, so
+ * it escalates to at least 'write'; when combined with a real execution
+ * pipeline (`curl ... | sh`, `sh -c`, `eval`) the BYPASS patterns above
+ * still force 'dangerous'.
  *
- * 默认返回 'read'（无匹配）。
+ * Defaults to 'read' (no match).
  */
 export function assessLocalRisk(command: string): LocalRiskLevel {
   if (!command || typeof command !== 'string') return 'read'
 
-  // 反绕过优先：一旦命中，直接 dangerous，不再继续。
-  // 注意：$() 和反引号是真正的命令替换，不属于"变量引用噪音"，
-  // 所以 BYPASS_PATTERNS 对原始命令做匹配。
+  // Anti-bypass first: once hit, return 'dangerous' directly.
+  // $() and backticks are genuine command substitution, not variable noise,
+  // so BYPASS_PATTERNS run on the raw command.
   for (const re of BYPASS_PATTERNS) {
     if (re.test(command)) return 'dangerous'
   }
 
-  // 剥离引号内容 / $VAR / ${VAR} / 重定向目标，收窄误报。
-  // 危险与写模式都对剥离后的命令部分匹配，避免引号内的 "rm -rf /" 或
-  // $HOME、> output.txt 等 shell 语法噪音被误判。
-  const stripped = stripShellNoise(command)
-
   let isDangerous = false
+  let isWrite = false
+
+  // Command substitution alone escalates to at least 'write': the inner
+  // command is not statically analyzable, but it is not automatically
+  // destructive either.
+  if (/\$\(/.test(command) || command.includes('`')) {
+    isWrite = true
+  }
+
+  // Strip quoted strings, then shell noise ($VAR references and redirection
+  // targets, keeping > /dev/...), so dangerous matching only sees the actual
+  // command parts. This avoids false hits from quoted text such as
+  // `grep 'a>b' file` or `echo "rm -rf"`.
+  const noQuotes = stripQuoted(command)
+  const stripped = stripShellNoise(noQuotes)
+
   for (const re of DANGEROUS_PATTERNS) {
     if (re.test(stripped)) {
       isDangerous = true
       break
     }
   }
+  if (!isDangerous && isForceRecursiveRm(stripped)) {
+    isDangerous = true
+  }
 
-  // 写操作对剥离后的命令匹配：引号内的 rm/mv 等不会误命中。
-  let isWrite = false
+  // Write patterns run on the quote-stripped command: redirection targets
+  // are real writes and must stay visible.
   for (const re of WRITE_PATTERNS) {
-    if (re.test(stripped)) {
+    if (re.test(noQuotes)) {
       isWrite = true
       break
     }
   }
-  // 引号外的重定向操作符（> / >>）是写文件操作，单独检测以避免
-  // 引号内的 > 误报（stripShellNoise 会移除重定向目标，故在此用原始命令）。
-  if (!isWrite && hasRedirectWrite(command)) isWrite = true
 
   if (isDangerous) return 'dangerous'
   if (isWrite) return 'write'

