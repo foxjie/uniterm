@@ -1545,7 +1545,12 @@ func (a *App) SummarizeAIContext(apiKey, baseURL, model, protocol, userAgent, pr
 			endpoint = base + "/messages"
 		}
 		body["system"] = aiSummarySystem
-		body["max_tokens"] = 4096
+		// Anthropic counts hidden extended-thinking output against max_tokens
+		// too. A 4096 cap (or even 8192) is exhausted by thinking models before
+		// any handoff text is emitted, leaving stop_reason=max_tokens and a
+		// failed compaction on every attempt. Match the generous ceiling the
+		// responses branch already uses for reasoning models.
+		body["max_tokens"] = 16384
 		body["messages"] = []map[string]string{{"role": "user", "content": input}}
 	case "responses":
 		endpoint = base + "/responses"

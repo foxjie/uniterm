@@ -1,4 +1,4 @@
-import { SummarizeAIContext } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { FrontendLog, SummarizeAIContext } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { useAIStore } from '../stores/aiStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import type { AIContextSummary } from '../types/ai'
@@ -78,6 +78,9 @@ export async function prepareAgentContext(system: string, tools: unknown[], skip
     } catch (error) {
       checkCurrent()
       if (error instanceof ChatCancelledError) throw error
+      // Silent fallback made compaction failures impossible to diagnose from
+      // the log; record the reason (never the transcript contents).
+      FrontendLog('contextCompaction', `summarization failed: ${error instanceof Error ? error.message : String(error)}`)
       failed = true
       summary = undefined
     } finally {
