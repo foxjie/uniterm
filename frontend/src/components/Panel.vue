@@ -169,6 +169,7 @@ import { connectFileMenuKey } from '../utils/fileTransferUtils'
 import { isMobilePlatform } from '../utils/platform'
 import type { ConnectionConfig } from '../types/session'
 import type { CredentialResult } from './CredentialPrompt.vue'
+import { applyRetryCredentials } from '../composables/applyRetryCredentials'
 import { Clipboard } from '@wailsio/runtime'
 
 // Escape sequences to disable all xterm mouse tracking modes.
@@ -492,8 +493,7 @@ async function repromptCredentials() {
     ''
   )
   if (!result) return
-  config.user = result.user || config.user
-  config.password = result.password
+  props.panel.config = await applyRetryCredentials(config, result)
   retryAttempt = 0
   await retryConnection()
 }
@@ -576,8 +576,7 @@ async function retryConnection() {
       baseTerminalRef.value?.setRetryOnEnter(true)
       return
     }
-    props.panel.config.user = result.user || props.panel.config.user
-    props.panel.config.password = result.password
+    props.panel.config = await applyRetryCredentials(props.panel.config, result)
   }
 
   const now = new Date()
