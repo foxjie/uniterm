@@ -1080,9 +1080,17 @@ function handleTerminalKey(e: KeyboardEvent): boolean {
     return false
   }
 
-  // macOS Cmd+C: copy selection when there is one. With no selection, don't
-  // intercept — let it pass through (Ctrl+C interrupt uses ctrlKey, unaffected).
-  if (isMac && e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'c' || e.key === 'C') && e.type === 'keydown') {
+  // Cmd+C (macOS) and plain Ctrl+C (Windows/Linux) copy the selection when
+  // there is one. With no selection, don't intercept — the key passes through
+  // to the PTY as the usual Ctrl+C interrupt. Mirrors Windows Terminal / most
+  // native terminals; without it, pressing Ctrl+C after selecting text (the
+  // copy habit, on top of the selectionAction auto-copy) sends ^C into the
+  // session and kills the running command instead (same shape as unmerged
+  // upstream PR #1194, which only covered the feature request).
+  const copyChord = isMac
+    ? e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey
+    : e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
+  if (copyChord && (e.key === 'c' || e.key === 'C') && e.type === 'keydown') {
     const sel = terminal?.getSelection()
     if (sel) {
       e.preventDefault()
