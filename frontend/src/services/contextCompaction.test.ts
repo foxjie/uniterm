@@ -6,6 +6,7 @@ vi.mock('../../bindings/github.com/ys-ll/uniterm/app', () => ({
   SummarizeAIContext: vi.fn(), ChatCompletion: vi.fn(),
   LoadAISessions: vi.fn().mockResolvedValue({ sessions: [] }),
   SaveAISessions: vi.fn().mockResolvedValue(undefined),
+  FrontendLog: vi.fn(),
 }))
 vi.mock('../stores/settingsStore', () => ({ useSettingsStore: () => ({ activeModel: {
   apiKey: 'test', baseURL: 'https://example.invalid/v1', model: 'test', protocol: 'openai',
