@@ -84,16 +84,31 @@ func TestEmitDataDropsOldestWhenQueueFull(t *testing.T) {
 	s := &baseSession{}
 	var mu sync.Mutex
 	var got []byte
+	delivered := make(chan struct{}, 1)
 	s.SetOnDataCallback(func(data []byte) {
 		mu.Lock()
-		defer mu.Unlock()
 		got = append(got, data...)
+		mu.Unlock()
+		select {
+		case delivered <- struct{}{}:
+		default:
+		}
 	})
 	s.startEmitLoop()
 
-	// Enqueue well past the queue capacity before the first flush window
-	// opens: the oldest chunks must be dropped, keeping the newest.
-	for i := 0; i < emitQueueCapacity+10; i++ {
+	// The idle→busy fast path delivers the first chunk before any batch
+	// window opens; wait for it so the queue-full phase below deterministically
+	// starts from an empty queue.
+	s.emitData([]byte{0})
+	select {
+	case <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle first chunk was never flushed")
+	}
+
+	// Enqueue well past the queue capacity while the (5s) window is closed:
+	// the oldest queued chunks must be dropped, keeping the newest.
+	for i := 1; i < emitQueueCapacity+10; i++ {
 		s.emitData([]byte{byte(i)})
 	}
 	// stopEmitLoop force-flushes whatever survived in the queue.
@@ -101,12 +116,12 @@ func TestEmitDataDropsOldestWhenQueueFull(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	want := make([]byte, 0, emitQueueCapacity)
+	want := []byte{0}
 	for i := 10; i < emitQueueCapacity+10; i++ {
 		want = append(want, byte(i))
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("delivered %v, want chunks %d..%d in order (drop-oldest)", got, 10, emitQueueCapacity+9)
+		t.Fatalf("delivered %v, want chunk 0 then chunks %d..%d in order (drop-oldest)", got, 10, emitQueueCapacity+9)
 	}
 }
 
@@ -278,8 +293,11 @@ func TestEmitDataWedgeFallsBackToDropOldest(t *testing.T) {
 	s := &baseSession{}
 	var mu sync.Mutex
 	var got []byte
+	entered := make(chan struct{})
+	once := &sync.Once{}
 	release := make(chan struct{})
 	s.SetOnDataCallback(func(data []byte) {
+		once.Do(func() { close(entered) })
 		<-release
 		mu.Lock()
 		defer mu.Unlock()
@@ -288,10 +306,20 @@ func TestEmitDataWedgeFallsBackToDropOldest(t *testing.T) {
 	s.startEmitLoop()
 	t.Cleanup(s.stopEmitLoop)
 
+	// The idle→busy fast path delivers chunk 0 into the wedged consumer, so
+	// the overflow phase below starts from an empty queue and the drop count
+	// is deterministic (chunk 0 is delivered, not dropped).
+	s.emitData([]byte{0})
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle first chunk never reached the consumer")
+	}
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < emitQueueCapacity+10; i++ {
+		for i := 1; i < emitQueueCapacity+10; i++ {
 			s.emitData([]byte{byte(i)})
 		}
 	}()
@@ -301,13 +329,13 @@ func TestEmitDataWedgeFallsBackToDropOldest(t *testing.T) {
 		t.Fatal("producer never degraded to drop-oldest; readLoop would freeze")
 	}
 
-	// Read the drop counter before stopEmitLoop: its force-flush drains the
-	// queue and resets the counter (after logging the overflow).
+	// Read the drop counter before releasing/stopping: the force-flush drains
+	// the queue and resets the counter (after logging the overflow).
 	s.emitMu.Lock()
 	dropped := s.emitDropped
 	s.emitMu.Unlock()
-	if dropped != 10 {
-		t.Fatalf("dropped %d chunks, want 10", dropped)
+	if dropped != 9 {
+		t.Fatalf("dropped %d chunks, want 9", dropped)
 	}
 	close(release)
 
@@ -315,11 +343,80 @@ func TestEmitDataWedgeFallsBackToDropOldest(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	want := make([]byte, 0, emitQueueCapacity)
+	want := []byte{0}
 	for i := 10; i < emitQueueCapacity+10; i++ {
 		want = append(want, byte(i))
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("delivered %v, want chunks %d..%d (drop-oldest after watchdog)", got, 10, emitQueueCapacity+9)
+		t.Fatalf("delivered %v, want chunk 0 then chunks %d..%d (drop-oldest after watchdog)", got, 10, emitQueueCapacity+9)
+	}
+}
+
+// Latency: an isolated chunk after an idle gap must not wait out the batch
+// window — interactive echoes pay only the IPC, not the coalescing delay.
+func TestEmitDataIdleFirstChunkFlushesImmediately(t *testing.T) {
+	oldInterval := emitFlushInterval
+	emitFlushInterval = 5 * time.Second
+	t.Cleanup(func() { emitFlushInterval = oldInterval })
+
+	s := &baseSession{}
+	delivered := make(chan time.Duration, 1)
+	start := time.Now()
+	s.SetOnDataCallback(func(data []byte) {
+		delivered <- time.Since(start)
+	})
+	s.startEmitLoop()
+	t.Cleanup(s.stopEmitLoop)
+
+	s.emitData([]byte("ping"))
+	select {
+	case elapsed := <-delivered:
+		if elapsed > 500*time.Millisecond {
+			t.Fatalf("idle chunk waited %s; the batch window was not skipped", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle chunk was never delivered")
+	}
+}
+
+// Coalescing must not produce payloads that cross Wails' inline event limit:
+// oversized flushes are split into emitFlushMaxBytes pieces, in order, lossless.
+func TestFlushEmitChunksCapsCallbackPayloadSize(t *testing.T) {
+	oldCap := emitFlushMaxBytes
+	emitFlushMaxBytes = 100
+	t.Cleanup(func() { emitFlushMaxBytes = oldCap })
+
+	s := &baseSession{}
+	var mu sync.Mutex
+	var sizes []int
+	var got []byte
+	s.SetOnDataCallback(func(data []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		sizes = append(sizes, len(data))
+		got = append(got, data...)
+	})
+
+	chunks := [][]byte{}
+	for i := 0; i < 5; i++ {
+		chunks = append(chunks, bytes.Repeat([]byte{byte(i)}, 60)) // 300 total
+	}
+	// Also covers the single oversized chunk path.
+	s.flushEmitChunks(chunks)
+	s.flushEmitChunks([][]byte{bytes.Repeat([]byte{9}, 250)})
+
+	mu.Lock()
+	defer mu.Unlock()
+	wantSizes := []int{100, 100, 100, 100, 100, 50}
+	if len(sizes) != len(wantSizes) {
+		t.Fatalf("callback sizes %v, want %v", sizes, wantSizes)
+	}
+	for i, w := range wantSizes {
+		if sizes[i] != w {
+			t.Fatalf("callback %d size %d, want %d", i, sizes[i], w)
+		}
+	}
+	if len(got) != 550 {
+		t.Fatalf("delivered %d bytes, want 550 (lossless split)", len(got))
 	}
 }

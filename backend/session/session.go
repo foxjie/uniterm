@@ -467,6 +467,10 @@ type baseSession struct {
 	emitQueue   [][]byte
 	emitDropped int
 	emitClosing bool
+	// emitLastFlush is when emitLoop last delivered a flush. A wake that
+	// follows an idle gap longer than emitFlushInterval flushes immediately
+	// instead of opening another batch window (see emitLoop).
+	emitLastFlush time.Time
 	// emitOverflow marks degraded drop-oldest mode: set when the producer
 	// blocked on a full queue past emitBlockWatchdog, cleared once the
 	// queue fully drains. Guarded by emitMu.
@@ -493,8 +497,18 @@ const (
 var (
 	// emitFlushInterval coalesces high-frequency chunks into one IPC
 	// event per window, cutting Wails emit count 10-100x under load.
+	// The window only applies to sustained bursts: a first chunk that
+	// arrives after an idle gap is flushed immediately, so interactive
+	// echoes never pay the window (see emitLoop).
 	// Package-level var so tests can shorten it.
 	emitFlushInterval = 16 * time.Millisecond
+	// emitFlushMaxBytes bounds a single coalesced callback payload.
+	// Wails inlines event payloads up to 8192 JSON-marshalled bytes and
+	// parks larger ones behind a fetch round-trip that serialises every
+	// later event behind it; ANSI escaping inflates JSON by up to ~2x,
+	// so 4 KiB raw keeps flushes on the inline path.
+	// Package-level var so tests can shorten it.
+	emitFlushMaxBytes = 4096
 	// emitBlockWatchdog bounds how long queueEmit blocks the producer while
 	// the queue is full. Blocking backpressures the PTY/SSH channel and
 	// pauses the remote writer — the way a physical terminal applies flow
@@ -750,8 +764,14 @@ func (s *baseSession) drainEmitQueue() [][]byte {
 	return chunks
 }
 
-// flushEmitChunks coalesces chunks into a single callback invocation so a
-// flood of output costs one IPC event per flush window, not one per chunk.
+// flushEmitChunks coalesces chunks into callback invocations so a flood of
+// output costs one IPC event per flush window, not one per chunk — capped at
+// emitFlushMaxBytes each so no coalesced payload ever crosses into Wails'
+// out-of-line event storage (a parked event serialises every later one
+// behind its fetch round-trip). Splitting a joined stream at raw byte
+// boundaries is safe: every consumer downstream (xterm.write, sessionStore,
+// DCS reassembler) treats the stream as a concatenation, and readLoops
+// already produce arbitrary 16 KiB boundaries.
 func (s *baseSession) flushEmitChunks(chunks [][]byte) {
 	s.mu.RLock()
 	cb := s.onDataCallback
@@ -759,7 +779,7 @@ func (s *baseSession) flushEmitChunks(chunks [][]byte) {
 	if cb == nil || len(chunks) == 0 {
 		return
 	}
-	if len(chunks) == 1 {
+	if len(chunks) == 1 && len(chunks[0]) <= emitFlushMaxBytes {
 		cb(chunks[0])
 		return
 	}
@@ -771,7 +791,13 @@ func (s *baseSession) flushEmitChunks(chunks [][]byte) {
 	for _, c := range chunks {
 		joined = append(joined, c...)
 	}
-	cb(joined)
+	for len(joined) > emitFlushMaxBytes {
+		cb(joined[:emitFlushMaxBytes])
+		joined = joined[emitFlushMaxBytes:]
+	}
+	if len(joined) > 0 {
+		cb(joined)
+	}
 }
 
 func (s *baseSession) emitLoop() {
@@ -786,22 +812,33 @@ func (s *baseSession) emitLoop() {
 		for len(s.emitQueue) == 0 && !s.emitClosing {
 			s.emitCond.Wait()
 		}
+		// Idle→busy transition: interactive echoes matter more than
+		// coalescing the first chunk, so skip the batch window for it.
+		// Requires a non-empty queue so a wake caused by emitClosing with
+		// nothing queued still falls through to the shutdown select.
+		idle := len(s.emitQueue) > 0 && time.Since(s.emitLastFlush) > emitFlushInterval
 		s.emitMu.Unlock()
 
 		for {
-			// Batch window: give the producer a beat to accumulate more
-			// chunks before flushing.
-			timer.Reset(emitFlushInterval)
-			select {
-			case <-s.emitQuit:
-				s.flushEmitChunks(s.drainEmitQueue())
-				return
-			case <-timer.C:
+			if !idle {
+				// Batch window: give the producer a beat to accumulate more
+				// chunks before flushing.
+				timer.Reset(emitFlushInterval)
+				select {
+				case <-s.emitQuit:
+					s.flushEmitChunks(s.drainEmitQueue())
+					return
+				case <-timer.C:
+				}
 			}
+			idle = false
 			chunks := s.drainEmitQueue()
 			if len(chunks) == 0 {
 				break
 			}
+			s.emitMu.Lock()
+			s.emitLastFlush = time.Now()
+			s.emitMu.Unlock()
 			s.flushEmitChunks(chunks)
 		}
 	}
