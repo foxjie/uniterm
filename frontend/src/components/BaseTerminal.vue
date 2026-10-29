@@ -183,6 +183,7 @@ import { installGhostText, pickGhostSuggestion, type GhostText } from '../utils/
 import { resolveXtermBackground, applyTerminalBgVar, resolveTerminalThemeName } from '../composables/useTerminalTheme'
 import { stripCursorBlink } from '../utils/cursor'
 import { applyBackspaceKey } from '../utils/terminalOptions'
+import { handleTerminalWordDelete } from '../utils/terminalWordDelete'
 import { formatFontFamily } from '../utils/formatFontFamily'
 import { normalizePastedText, pasteWithScroll } from '../utils/terminalPaste'
 import {
@@ -1061,6 +1062,15 @@ function handleTerminalKey(e: KeyboardEvent): boolean {
   if (e.type === 'keydown' && (e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt' || e.key === 'Meta')) {
     return false
   }
+
+  if (terminal && handleTerminalWordDelete(e, {
+    connectionType: panel.value?.config?.type ?? panel.value?.type,
+    connected: !!props.sessionId && sessionStore.getStatus(props.sessionId) === 'connected',
+    alternateScreen: terminal.buffer.active.type === 'alternate',
+    passwordPrompt: terminalInput?.isPasswordMode() ?? false,
+    remoteOS: props.sessionId ? sessionStore.getRemoteOS(props.sessionId) : undefined,
+    hostPlatform: document.documentElement.dataset.platform,
+  }, data => terminal?.input(data))) return false
 
   // macOS 26 WKWebView: xterm's modifier handling for Shift+Delete is
   // unreliable and may emit no sequence, so the key silently fails to delete
