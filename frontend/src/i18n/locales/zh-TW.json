@@ -1020,6 +1020,15 @@
   "serial.parityMark": "標記",
   "serial.paritySpace": "空格",
   "session.startLog": "開始記錄日誌",
+  "session.hostKeyChangedTitle": "主機金鑰已變更",
+  "session.hostKeyChangedBody": "{host} 的主機金鑰與先前記錄的不一致。可能是伺服器重裝所致，也可能是連線被劫持，請查證後再繼續。",
+  "session.hostKeyHost": "主機",
+  "session.hostKeyType": "金鑰類型",
+  "session.hostKeyOldFp": "已記錄指紋",
+  "session.hostKeyNewFp": "伺服器指紋",
+  "session.hostKeyAcceptReconnect": "接受並重連",
+  "session.hostKeyConnectOnce": "本次連線，不儲存",
+  "session.hostKeyAcceptFailed": "接受新金鑰失敗",
   "session.stopLog": "停止記錄日誌",
   "session.openLogDir": "開啟日誌資料夾",
   "session.recording": "正在記錄日誌：{path}",
@@ -2138,5 +2147,6 @@
   "localsrv.s3.hint": "實驗性 S3 相容服務，基於本地目錄。使用不做簽章驗證的 S3 用戶端存取，例如：mc --no-sign-request alias set local http://<host>:<連接埠>/ ; mc ls local",
   "localsrv.s3.accessKey": "Access key",
   "localsrv.s3.secretKey": "Secret key",
-  "localsrv.s3.keyPlaceholder": "可選"
+  "localsrv.s3.keyPlaceholder": "可選",
+  "terminal.copySingleLine": "複製為單行"
 }

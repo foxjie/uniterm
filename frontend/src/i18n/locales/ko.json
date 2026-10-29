@@ -986,6 +986,15 @@
   "serial.parityMark": "마크",
   "serial.paritySpace": "스페이스",
   "session.startLog": "로그 기록 시작",
+  "session.hostKeyChangedTitle": "호스트 키가 변경되었습니다",
+  "session.hostKeyChangedBody": "{host}의 호스트 키가 이전 기록과 일치하지 않습니다. 서버 재설치 또는 연결 가로채기일 수 있습니다. 확인 후 계속하세요.",
+  "session.hostKeyHost": "호스트",
+  "session.hostKeyType": "키 유형",
+  "session.hostKeyOldFp": "기록된 지문",
+  "session.hostKeyNewFp": "서버 지문",
+  "session.hostKeyAcceptReconnect": "수락 후 다시 연결",
+  "session.hostKeyConnectOnce": "이번 연결만 (저장 안 함)",
+  "session.hostKeyAcceptFailed": "새 키 수락 실패",
   "session.stopLog": "로그 기록 중지",
   "session.openLogDir": "로그 폴더 열기",
   "session.recording": "{path}에 기록 중",
@@ -2107,5 +2116,6 @@
   "localsrv.s3.hint": "로컬 디렉터리를 제공하는 실험적 S3 호환 서버입니다. 서명 검증이 없는 S3 클라이언트를 사용하세요(예: mc --no-sign-request alias set local http://<host>:<port>/ ; mc ls local).",
   "localsrv.s3.accessKey": "Access key",
   "localsrv.s3.secretKey": "Secret key",
-  "localsrv.s3.keyPlaceholder": "선택 사항"
+  "localsrv.s3.keyPlaceholder": "선택 사항",
+  "terminal.copySingleLine": "한 줄로 복사"
 }

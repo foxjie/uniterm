@@ -982,6 +982,15 @@
   "serial.parityMark": "Marca",
   "serial.paritySpace": "Espaço",
   "session.startLog": "Iniciar gravação do log",
+  "session.hostKeyChangedTitle": "A chave do host mudou",
+  "session.hostKeyChangedBody": "A chave do host de {host} não corresponde à registrada anteriormente. Pode ser uma reinstalação do servidor ou uma conexão interceptada. Verifique antes de continuar.",
+  "session.hostKeyHost": "Host",
+  "session.hostKeyType": "Tipo de chave",
+  "session.hostKeyOldFp": "Impressão registrada",
+  "session.hostKeyNewFp": "Impressão do servidor",
+  "session.hostKeyAcceptReconnect": "Aceitar e reconectar",
+  "session.hostKeyConnectOnce": "Conectar apenas nesta vez, sem salvar",
+  "session.hostKeyAcceptFailed": "Falha ao aceitar a nova chave",
   "session.stopLog": "Parar gravação do log",
   "session.openLogDir": "Abrir pasta de logs",
   "session.recording": "Gravando em {path}",
@@ -2103,5 +2112,6 @@
   "localsrv.s3.hint": "Servidor experimental compatível com S3 sobre um diretório local. Use um cliente S3 sem verificação de assinatura, p. ex. mc --no-sign-request alias set local http://<host>:<port>/ ; mc ls local",
   "localsrv.s3.accessKey": "Access key",
   "localsrv.s3.secretKey": "Secret key",
-  "localsrv.s3.keyPlaceholder": "opcional"
+  "localsrv.s3.keyPlaceholder": "opcional",
+  "terminal.copySingleLine": "Copiar em uma linha"
 }

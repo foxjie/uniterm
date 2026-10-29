@@ -168,6 +168,11 @@ type ConnectionConfig struct {
 	Proxy             *SocksProxy `json:"-"`
 	TunnelSSHUser     string      `json:"tunnelSSHUser,omitempty"`
 	TunnelSSHPassword string      `json:"tunnelSSHPassword,omitempty"`
+	// TunnelTargetHost/Port preserve the pre-tunnel target for protocols that
+	// validate the client-visible destination after Host/Port are rewritten to
+	// the local forwarder. Runtime-only; never persisted or sent to the UI.
+	TunnelTargetHost string `json:"-"`
+	TunnelTargetPort int    `json:"-"`
 	// SFTP max concurrent transfers (0 = unlimited)
 	SftpMaxConcurrency int `json:"sftpMaxConcurrency,omitempty"`
 	// FileTransferProto selects the file-transfer protocol used by the SSH

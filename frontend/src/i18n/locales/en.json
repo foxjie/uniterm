@@ -1020,6 +1020,15 @@
   "serial.parityMark": "Mark",
   "serial.paritySpace": "Space",
   "session.startLog": "Start recording log",
+  "session.hostKeyChangedTitle": "Host key changed",
+  "session.hostKeyChangedBody": "The host key of {host} does not match the one recorded previously. This may be caused by a server reinstall, or the connection may be intercepted. Verify before continuing.",
+  "session.hostKeyHost": "Host",
+  "session.hostKeyType": "Key type",
+  "session.hostKeyOldFp": "Recorded fingerprint",
+  "session.hostKeyNewFp": "Server fingerprint",
+  "session.hostKeyAcceptReconnect": "Accept and reconnect",
+  "session.hostKeyConnectOnce": "Connect once, don't save",
+  "session.hostKeyAcceptFailed": "Failed to accept the new key",
   "session.stopLog": "Stop recording log",
   "session.openLogDir": "Open log folder",
   "session.recording": "Recording to {path}",
@@ -2138,5 +2147,6 @@
   "localsrv.s3.hint": "Experimental S3-compatible server over a local directory. Use an S3 client without signature verification, e.g. mc --no-sign-request alias set local http://<host>:<port>/ ; mc ls local",
   "localsrv.s3.accessKey": "Access key",
   "localsrv.s3.secretKey": "Secret key",
-  "localsrv.s3.keyPlaceholder": "optional"
+  "localsrv.s3.keyPlaceholder": "optional",
+  "terminal.copySingleLine": "Copy as single line"
 }

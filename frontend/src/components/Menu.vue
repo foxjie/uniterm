@@ -35,6 +35,15 @@ import { ref, reactive, provide, watch, nextTick } from 'vue'
 interface ActiveMenu { el: () => HTMLElement | null; close: () => void }
 let active: ActiveMenu | null = null
 let docBound = false
+// Pause for a host modal (e.g. an ElMessageBox prompt) opened on top of the
+// active menu: while paused, outside-click / Escape must not dismiss the menu,
+// so row actions (rename / delete) can be repeated without reopening. The
+// dialog behaves like a child of the menu for dismissal purposes.
+let docClosePaused = false
+// Generation counter: every pause gets a token; resuming with a stale token
+// (a newer pause took over) is a no-op, so a lost finally() can never leave
+// an orphaned resume able to clobber the current pause.
+let pauseGen = 0
 
 // Close the active menu whenever any surface broadcasts the legacy
 // global:close-context-menus event (opening a dialog,
@@ -62,6 +71,11 @@ function activate(m: ActiveMenu) {
   }
   window.dispatchEvent(new Event('global:close-context-menus'))
   active?.close()
+  // A different menu is taking over: any modal-pause belonging to the previous
+  // interaction is dead (its dialog goes away with the menu it guarded), so
+  // drop the flag here — before the host of the new menu can call pauseDocClose
+  // (which happens synchronously in its click handler, i.e. after this line).
+  docClosePaused = false
   active = m
   if (!docBound) {
     document.addEventListener('click', onDocClick)
@@ -78,13 +92,28 @@ function deactivate(m: ActiveMenu) {
 // Clicks inside a teleported flyout (see MenuSubmenu) live outside the menu root
 // in the DOM but must count as inside.
 function onDocClick(e: MouseEvent) {
-  if (!active) return
+  if (!active || docClosePaused) return
   const t = e.target as HTMLElement
   const el = active.el()
   if (el && !el.contains(t) && !t.closest('.menu-submenu')) active.close()
 }
 function onDocKeydown(e: KeyboardEvent) {
+  if (docClosePaused) return
   if (e.key === 'Escape') active?.close()
+}
+
+// Hosts call this (via the exposed wrapper) right before opening a modal that
+// floats above the open menu. The pause must be synchronous because the click
+// that triggered the host handler is still propagating to onDocClick; the
+// returned resume() (call it when the dialog closes) lets outside-click/Escape
+// dismissal take effect again. A newer pause supersedes an older one whose
+// resume was never called.
+function pauseDocClose(): () => void {
+  docClosePaused = true
+  const token = ++pauseGen
+  return () => {
+    if (token === pauseGen) docClosePaused = false
+  }
 }
 
 const props = defineProps<{
@@ -181,7 +210,7 @@ function toggle(anchorEl: HTMLElement, data?: unknown) {
   }
 }
 
-defineExpose({ open, openAt, toggle, close: closeFn })
+defineExpose({ open, openAt, toggle, close: closeFn, pauseDocClose })
 
 // Hovering anywhere outside a submenu-wrap or its open flyout collapses it.
 function onInnerMouseOver(e: MouseEvent) {

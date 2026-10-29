@@ -982,6 +982,15 @@
   "serial.parityMark": "Mark",
   "serial.paritySpace": "Space",
   "session.startLog": "Bắt đầu ghi log",
+  "session.hostKeyChangedTitle": "Khóa máy chủ đã thay đổi",
+  "session.hostKeyChangedBody": "Khóa máy chủ của {host} không khớp với bản đã ghi. Có thể do cài lại máy chủ hoặc kết nối bị đánh chặn. Hãy kiểm tra trước khi tiếp tục.",
+  "session.hostKeyHost": "Máy chủ",
+  "session.hostKeyType": "Loại khóa",
+  "session.hostKeyOldFp": "Vân tay đã ghi",
+  "session.hostKeyNewFp": "Vân tay máy chủ",
+  "session.hostKeyAcceptReconnect": "Chấp nhận và kết nối lại",
+  "session.hostKeyConnectOnce": "Kết nối lần này, không lưu",
+  "session.hostKeyAcceptFailed": "Chấp nhận khóa mới thất bại",
   "session.stopLog": "Dừng ghi log",
   "session.openLogDir": "Mở thư mục log",
   "session.recording": "Đang ghi vào {path}",
@@ -2103,5 +2112,6 @@
   "localsrv.s3.hint": "Máy chủ thử nghiệm tương thích S3 trên một thư mục cục bộ. Hãy dùng máy khách S3 không xác minh chữ ký, ví dụ: mc --no-sign-request alias set local http://<host>:<port>/ ; mc ls local",
   "localsrv.s3.accessKey": "Access key",
   "localsrv.s3.secretKey": "Secret key",
-  "localsrv.s3.keyPlaceholder": "tùy chọn"
+  "localsrv.s3.keyPlaceholder": "tùy chọn",
+  "terminal.copySingleLine": "Sao chép thành một dòng"
 }

@@ -155,7 +155,7 @@ func (ts *TunnelService) openUserTunnel(ctx context.Context, t Tunnel, resolve C
 	if err != nil {
 		return nil, nil, err
 	}
-	exit, clients, err := ts.dialChain(ctx, chain, t.Upstream)
+	exit, clients, err := ts.dialChain(ctx, chain, t.Upstream, t.SSHConnID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -370,7 +370,10 @@ func buildHopChain(exitID string, resolve ConnResolver) ([]ConnectionConfig, err
 // client (chain tail) plus every client for teardown. The first hop is dialed
 // directly (or through the upstream proxy); each subsequent hop is dialed
 // through the previous client — the standard ProxyJump chaining.
-func (ts *TunnelService) dialChain(ctx context.Context, chain []ConnectionConfig, upstream *SocksProxy) (*ssh.Client, []*ssh.Client, error) {
+// dialChain dials the hop chain. chainSessionID identifies the tunnel's SSH
+// connection; it rides along in host key change events so the frontend can
+// relate the dialog to the right connection.
+func (ts *TunnelService) dialChain(ctx context.Context, chain []ConnectionConfig, upstream *SocksProxy, chainSessionID string) (*ssh.Client, []*ssh.Client, error) {
 	var clients []*ssh.Client
 	var prev *ssh.Client
 	var stopClose []func() bool
@@ -415,7 +418,7 @@ func (ts *TunnelService) dialChain(ctx context.Context, chain []ConnectionConfig
 			User:              cfg.User,
 			Auth:              authMethods,
 			Timeout:           30 * time.Second,
-			HostKeyCallback:   ssh.InsecureIgnoreHostKey(),
+			HostKeyCallback:   HostKeyCallback(cfg.Host, strconv.Itoa(cfg.Port), chainSessionID),
 			Config:            algoSet.config(),
 			HostKeyAlgorithms: algoSet.HostKeys,
 		}

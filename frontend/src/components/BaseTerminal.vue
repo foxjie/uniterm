@@ -63,6 +63,7 @@
       <MenuItem :class="{ disabled: !menu.hasSelection.value }" :shortcut="menuShortcut('copy')" @click="menu.copySelection">
         {{ t('terminal.copy') }}
       </MenuItem>
+      <MenuItem :class="{ disabled: !menu.hasSelection.value }" @click="menu.copySingleLine">{{ t('terminal.copySingleLine') }}</MenuItem>
       <MenuItem :class="{ disabled: !menu.hasSelection.value }" @click="menu.copyAndPaste">
         {{ t('terminal.copyAndPaste') }}
       </MenuItem>
@@ -141,7 +142,8 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { SessionEndZmodem } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { requestSessionResize } from '../services/sessionResizeOnce'
-import { queuedSessionWrite } from '../services/sessionWriter'
+import { queuedSessionWrite as queueRawSessionWrite } from '../services/sessionWriter'
+import { observeCommandInput, updateCommandWraps, getTerminalSelection } from '../services/terminalCommandWrap'
 import { WriteFileBase64, SaveFileDialog, FrontendLog, EnableSessionOutputLog, DisableSessionOutputLog, GetSessionOutputLogInfo, OpenPathInExplorer } from '../../bindings/github.com/ys-ll/uniterm/app'
 import { useNativeFileDrop } from '../composables/useFilePanel'
 import { connectFileMenuKey } from '../utils/fileTransferUtils'
@@ -182,6 +184,7 @@ import { installGhostText, pickGhostSuggestion, type GhostText } from '../utils/
 import { resolveXtermBackground, applyTerminalBgVar, resolveTerminalThemeName } from '../composables/useTerminalTheme'
 import { stripCursorBlink } from '../utils/cursor'
 import { applyBackspaceKey } from '../utils/terminalOptions'
+import { handleTerminalWordDelete } from '../utils/terminalWordDelete'
 import { formatFontFamily } from '../utils/formatFontFamily'
 import { normalizePastedText, pasteWithScroll } from '../utils/terminalPaste'
 import {
@@ -260,6 +263,7 @@ function writeStamped(data: string, onParsed?: () => void) {
   const ts = Date.now()
   const before = currentAbsoluteLine(sid)
   t.write(data, () => {
+    updateCommandWraps(t)
     recordWrite(sid, before, ts)
     onParsed?.()
   })
@@ -668,7 +672,7 @@ function getSearchAddon() {
 }
 
 function getSelection(): string {
-  return terminal?.getSelection() || ''
+  return terminal ? getTerminalSelection(terminal) : ''
 }
 
 // The suggestion to hint inline (fish / zsh-autosuggestions style), gated on
@@ -1009,6 +1013,12 @@ function onSplitResizeEnd() {
   })
 }
 
+function queuedSessionWrite(sessionId: string, data: string) {
+  const managed = getManagedTerminal(sessionId)
+  if (managed && managed.activeRefs.size > 0) observeCommandInput(managed.terminal, data)
+  return queueRawSessionWrite(sessionId, data)
+}
+
 function writeTerminalInput(data: string, inAlternateScreen: boolean) {
   const sid = props.sessionId
   const filtered = filterTerminalInput(data, inAlternateScreen)
@@ -1055,6 +1065,15 @@ function handleTerminalKey(e: KeyboardEvent): boolean {
     return false
   }
 
+  if (terminal && handleTerminalWordDelete(e, {
+    connectionType: panel.value?.config?.type ?? panel.value?.type,
+    connected: !!props.sessionId && sessionStore.getStatus(props.sessionId) === 'connected',
+    alternateScreen: terminal.buffer.active.type === 'alternate',
+    passwordPrompt: terminalInput?.isPasswordMode() ?? false,
+    remoteOS: props.sessionId ? sessionStore.getRemoteOS(props.sessionId) : undefined,
+    hostPlatform: document.documentElement.dataset.platform,
+  }, data => terminal?.input(data))) return false
+
   // macOS 26 WKWebView: xterm's modifier handling for Shift+Delete is
   // unreliable and may emit no sequence, so the key silently fails to delete
   // (issue #538). Inject the standard CSI delete sequence ESC[3~ directly for
@@ -1087,13 +1106,13 @@ function handleTerminalKey(e: KeyboardEvent): boolean {
   // to the PTY as the usual Ctrl+C interrupt. Mirrors Windows Terminal / most
   // native terminals; without it, pressing Ctrl+C after selecting text (the
   // copy habit, on top of the selectionAction auto-copy) sends ^C into the
-  // session and kills the running command instead (same shape as unmerged
-  // upstream PR #1194, which only covered the feature request).
+  // session and kills the running command instead. Uses the wrap-aware
+  // getTerminalSelection so a hard-wrapped command copies as one line.
   const copyChord = isMac
     ? e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey
     : e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey
   if (copyChord && (e.key === 'c' || e.key === 'C') && e.type === 'keydown') {
-    const sel = terminal?.getSelection()
+    const sel = (terminal ? getTerminalSelection(terminal) : undefined)
     if (sel) {
       e.preventDefault()
       writeClipboard(sel)
@@ -1268,9 +1287,19 @@ function onTerminalTouchEnd() {
   touchPan.raf = requestAnimationFrame(step)
 }
 
+function onNativeTerminalCopy(event: ClipboardEvent) {
+  if (!isActive.value || !terminal || !event.clipboardData) return
+  const text = getTerminalSelection(terminal)
+  if (text === terminal.getSelection()) return
+  event.clipboardData.setData('text/plain', text)
+  event.preventDefault()
+  event.stopImmediatePropagation()
+}
+
 onMounted(() => {
   nativeDrop.bind()
   if (!terminalRef.value) return
+  terminalRef.value.addEventListener('copy', onNativeTerminalCopy, true)
 
   // Acquire shared terminal from manager (or create if first mount)
   const opts = getTerminalOptions()
@@ -1616,7 +1645,7 @@ onMounted(() => {
   terminal.onSelectionChange(() => {
     if (settingsStore.settings.terminal.selectionAction !== 'copy') return
     setTimeout(() => {
-      const text = terminal?.getSelection()
+      const text = (terminal ? getTerminalSelection(terminal) : undefined)
       if (!text) {
         // Selection cleared: reset the dedup guard, or re-selecting the same
         // text would never re-copy and a lost write could never be retried.
@@ -1896,7 +1925,7 @@ onMounted(() => {
     if (!isActive.value) return
     const detail = (e as CustomEvent).detail
     if (detail?.panelId && detail.panelId !== props.panelId) return
-    const sel = terminal?.getSelection()
+    const sel = (terminal ? getTerminalSelection(terminal) : undefined)
     if (sel) {
       writeClipboard(sel)
     }
@@ -2297,6 +2326,7 @@ watch(
 // so detachTerminal would see terminalRef.value === null and skip.
 // onBeforeUnmount fires while refs are still valid.
 onBeforeUnmount(() => {
+  terminalRef.value?.removeEventListener('copy', onNativeTerminalCopy, true)
   if (props.sessionId && terminalRef.value) {
     detachTerminal(props.sessionId, terminalRef.value)
   }
